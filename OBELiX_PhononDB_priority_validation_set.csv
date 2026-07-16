@@ -1,0 +1,21 @@
+split,obelix_id,obelix_formula,obelix_space_group,space_group_number,family,mp_id,phonondb_formula,phonondb_space_group,nims_dataset_url,nims_download_all_url,priority_tier
+train,9lo,Li3PO4,Pnma,62,LISICON,mp-2878,Li3PO4,Pnma (62),https://mdr.nims.go.jp/concern/datasets/kd17cz12z,https://mdr.nims.go.jp/download_all/kd17cz12z.zip,Tier 1
+train,w7d,Li3PO4,Pnma,62,LISICON,mp-2878,Li3PO4,Pnma (62),https://mdr.nims.go.jp/concern/datasets/kd17cz12z,https://mdr.nims.go.jp/download_all/kd17cz12z.zip,Tier 1
+train,qno,LiTi2(PO4)3,R-3c,167,NASICON,mp-18640,LiTi2(PO4)3,R-3c (167),https://mdr.nims.go.jp/concern/datasets/8336h6993,https://mdr.nims.go.jp/download_all/8336h6993.zip,Tier 1
+train,rr5,LiTi2(PO4)3,R-3c,167,NASICON,mp-18640,LiTi2(PO4)3,R-3c (167),https://mdr.nims.go.jp/concern/datasets/8336h6993,https://mdr.nims.go.jp/download_all/8336h6993.zip,Tier 1
+test,4p7,Li3ClO,Pm-3m,221,antiperovskite,mp-985585,Li3ClO,Pm-3m (221),https://mdr.nims.go.jp/concern/datasets/qn59q7766,https://mdr.nims.go.jp/download_all/qn59q7766.zip,Tier 1
+train,qbb,Li3OBr,Pm-3m,221,antiperovskite,mp-28593,Li3BrO,Pm-3m (221),https://mdr.nims.go.jp/concern/datasets/4m90f035n,https://mdr.nims.go.jp/download_all/4m90f035n.zip,Tier 1
+train,5wz,Li6PS5I,F-43m,216,argyrodites,mp-985582,Li6PS5I,F-43m (216),https://mdr.nims.go.jp/concern/datasets/d217qw467,https://mdr.nims.go.jp/download_all/d217qw467.zip,Tier 1
+train,p9u,Li6PS5I,F-43m,216,argyrodites,mp-985582,Li6PS5I,F-43m (216),https://mdr.nims.go.jp/concern/datasets/d217qw467,https://mdr.nims.go.jp/download_all/d217qw467.zip,Tier 1
+train,ywe,Li6PS5I,F-43m,216,argyrodites,mp-985582,Li6PS5I,F-43m (216),https://mdr.nims.go.jp/concern/datasets/d217qw467,https://mdr.nims.go.jp/download_all/d217qw467.zip,Tier 1
+train,l9v,Li3AlF6,C2/c,15,fluorides,mp-15254,Li3AlF6,C2/c (15),https://mdr.nims.go.jp/concern/datasets/zs25xc85p,https://mdr.nims.go.jp/download_all/zs25xc85p.zip,Tier 1
+test,p81,LiAlCl4,P21/c,14,halides,mp-22983,LiAlCl4,P2_1/c (14),https://mdr.nims.go.jp/concern/datasets/c821gq85b,https://mdr.nims.go.jp/download_all/c821gq85b.zip,Tier 1
+train,gvd,Li3N,P6/mmm,191,nitrides,mp-2251,Li3N,P6/mmm (191),https://mdr.nims.go.jp/concern/datasets/m900nz63k,https://mdr.nims.go.jp/download_all/m900nz63k.zip,Tier 1
+test,i47,LiZnPS4,I-4,82,sulfides,mp-11175,LiZnPS4,I-4 (82),https://mdr.nims.go.jp/concern/datasets/1544bv007,https://mdr.nims.go.jp/download_all/1544bv007.zip,Tier 1
+train,nhq,Li3PS4,Pnma,62,thio-LISICON,mp-985583,Li3PS4,Pnma (62),https://mdr.nims.go.jp/concern/datasets/9306t291b,https://mdr.nims.go.jp/download_all/9306t291b.zip,Tier 1
+train,mq1,Li3SbS4,Pmn21,31,thio-LISICON,mp-756316,Li3SbS4,Pmn2_1 (31),https://mdr.nims.go.jp/concern/datasets/zg64tr70g,https://mdr.nims.go.jp/download_all/zg64tr70g.zip,Tier 1
+train,e6b,Li4GeS4,Pnma,62,thio-LISICON,mp-30249,Li4GeS4,Pnma (62),https://mdr.nims.go.jp/concern/datasets/cj82kc69q,https://mdr.nims.go.jp/download_all/cj82kc69q.zip,Tier 1
+train,4ba,LiGe2(PO4)3,R-3c,167,NASICON,mp-541272,LiGe2(PO4)3,R-3c (167),https://mdr.nims.go.jp/concern/datasets/bz60d2656,https://mdr.nims.go.jp/download_all/bz60d2656.zip,Tier 2
+train,ldx,LiGe2(PO4)3,R-3c,167,NASICON,mp-541272,LiGe2(PO4)3,R-3c (167),https://mdr.nims.go.jp/concern/datasets/bz60d2656,https://mdr.nims.go.jp/download_all/bz60d2656.zip,Tier 2
+train,ur9,LiZr2(PO4)3,R-3c,167,NASICON,mp-541661,LiZr2(PO4)3,R-3c (167),https://mdr.nims.go.jp/concern/datasets/rf55zc484,https://mdr.nims.go.jp/download_all/rf55zc484.zip,Tier 2
+train,be9,LiGaBr4,P21/c,14,halides,mp-28326,LiGaBr4,P2_1/c (14),https://mdr.nims.go.jp/concern/datasets/9c67ws95f,https://mdr.nims.go.jp/download_all/9c67ws95f.zip,Tier 2
