@@ -1,0 +1,29 @@
+data_image0
+_chemical_formula_structural       Li3N
+_chemical_formula_sum              "Li3 N1"
+_cell_length_a       3.618043267708755
+_cell_length_b       3.6180430937316452
+_cell_length_c       3.8955017471568953
+_cell_angle_alpha    90.00000178761361
+_cell_angle_beta     89.99999733114478
+_cell_angle_gamma    120.00000359757905
+
+_space_group_name_H-M_alt    "P 1"
+_space_group_IT_number       1
+
+loop_
+  _space_group_symop_operation_xyz
+  'x, y, z'
+
+loop_
+  _atom_site_type_symbol
+  _atom_site_label
+  _atom_site_symmetry_multiplicity
+  _atom_site_fract_x
+  _atom_site_fract_y
+  _atom_site_fract_z
+  _atom_site_occupancy
+  Li  Li1       1.0  0.34257769790504106  0.672397443137782  0.049297261143066755  1.0000
+  Li  Li2       1.0  0.6759109802949984  0.339064176835935  0.9428890428738549  1.0000
+  Li  Li3       1.0  0.009244304732271622  0.005730829847515093  0.4960932296502455  1.0000
+  N   N1        1.0  0.009244470541426327  0.005730835112544232  0.9960932534348738  1.0000
