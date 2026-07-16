@@ -1,0 +1,29 @@
+data_image0
+_chemical_formula_structural       Li2BrO
+_chemical_formula_sum              "Li2 Br1 O1"
+_cell_length_a       3.877900528841267
+_cell_length_b       3.877898626204641
+_cell_length_c       3.9953880703745615
+_cell_angle_alpha    90.00000987674036
+_cell_angle_beta     89.99997831598597
+_cell_angle_gamma    90.00000456235666
+
+_space_group_name_H-M_alt    "P 1"
+_space_group_IT_number       1
+
+loop_
+  _space_group_symop_operation_xyz
+  'x, y, z'
+
+loop_
+  _atom_site_type_symbol
+  _atom_site_label
+  _atom_site_symmetry_multiplicity
+  _atom_site_fract_x
+  _atom_site_fract_y
+  _atom_site_fract_z
+  _atom_site_occupancy
+  Li  Li1       1.0  0.005737298986838226  0.5044638289941442  0.5715129764256838  1.0000
+  Li  Li2       1.0  0.5057372025040802  0.0044636987741889875  0.4210218794048162  1.0000
+  Br  Br1       1.0  0.005737328128470819  0.00446384330823466  0.9962677931595644  1.0000
+  O   O1        1.0  0.5057373029842943  0.5044638740221457  0.4962674887239174  1.0000
