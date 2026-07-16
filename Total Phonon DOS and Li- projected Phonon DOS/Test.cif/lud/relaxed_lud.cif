@@ -1,0 +1,32 @@
+data_image0
+_chemical_formula_structural       O3LaAlTiLi
+_chemical_formula_sum              "O3 La1 Al1 Ti1 Li1"
+_cell_length_a       5.585860633248365
+_cell_length_b       4.571798026575296
+_cell_length_c       5.585860814262578
+_cell_angle_alpha    69.22196873711053
+_cell_angle_beta     57.404233669380936
+_cell_angle_gamma    69.22197088987075
+
+_space_group_name_H-M_alt    "P 1"
+_space_group_IT_number       1
+
+loop_
+  _space_group_symop_operation_xyz
+  'x, y, z'
+
+loop_
+  _atom_site_type_symbol
+  _atom_site_label
+  _atom_site_symmetry_multiplicity
+  _atom_site_fract_x
+  _atom_site_fract_y
+  _atom_site_fract_z
+  _atom_site_occupancy
+  O   O1        1.0  0.03214033753055807  0.05463157126189471  0.5176119074387194  1.0000
+  O   O2        1.0  0.5259606755327603  0.05463156154470887  0.0237915179172305  1.0000
+  O   O3        1.0  0.8981508019515433  0.4728656767001931  0.8898020502826544  1.0000
+  La  La1       1.0  0.3587185130482268  0.4691934835655373  0.3503698544712964  1.0000
+  Al  Al1       1.0  0.9191332029363644  0.8640295368362936  0.9107844935903284  1.0000
+  Ti  Ti1       1.0  0.11508539783994899  0.19226462049136392  0.10673659956875328  1.0000
+  Li  Li1       1.0  0.7040448213022915  0.4120339336834078  0.6956960870951139  1.0000
