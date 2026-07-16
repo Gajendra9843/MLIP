@@ -1,0 +1,33 @@
+data_image0
+_chemical_formula_structural       Nb2O6
+_chemical_formula_sum              "Nb2 O6"
+_cell_length_a       3.9863927468131113
+_cell_length_b       3.986392816120291
+_cell_length_c       7.972785539664896
+_cell_angle_alpha    89.99999782453438
+_cell_angle_beta     89.99999574337767
+_cell_angle_gamma    89.99999364091232
+
+_space_group_name_H-M_alt    "P 1"
+_space_group_IT_number       1
+
+loop_
+  _space_group_symop_operation_xyz
+  'x, y, z'
+
+loop_
+  _atom_site_type_symbol
+  _atom_site_label
+  _atom_site_symmetry_multiplicity
+  _atom_site_fract_x
+  _atom_site_fract_y
+  _atom_site_fract_z
+  _atom_site_occupancy
+  Nb  Nb1       1.0  0.5081826081730328  0.5007856448165683  0.2491256011552542  1.0000
+  Nb  Nb2       1.0  0.508182250705755  0.5007855229007697  0.7491256090360495  1.0000
+  O   O1        1.0  0.008182669882525832  0.5007856376453583  0.24912561099660246  1.0000
+  O   O2        1.0  0.008182307398309786  0.500785603590292  0.7491256399827139  1.0000
+  O   O3        1.0  0.5081828112429836  0.0007856494515450668  0.24912556696157168  1.0000
+  O   O4        1.0  0.5081821620914124  0.0007855818320181085  0.7491256252035046  1.0000
+  O   O5        1.0  0.5081825313380324  0.5007856139478533  0.9991256128384329  1.0000
+  O   O6        1.0  0.5081825057711129  0.5007856350329666  0.49912559920909405  1.0000
