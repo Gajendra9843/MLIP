@@ -1,0 +1,34 @@
+data_image0
+_chemical_formula_structural       LaTi2O6
+_chemical_formula_sum              "La1 Ti2 O6"
+_cell_length_a       3.8192349677321196
+_cell_length_b       3.819235162844156
+_cell_length_c       8.136207983543787
+_cell_angle_alpha    89.99999863257777
+_cell_angle_beta     89.99999675282417
+_cell_angle_gamma    90.00000198491023
+
+_space_group_name_H-M_alt    "P 1"
+_space_group_IT_number       1
+
+loop_
+  _space_group_symop_operation_xyz
+  'x, y, z'
+
+loop_
+  _atom_site_type_symbol
+  _atom_site_label
+  _atom_site_symmetry_multiplicity
+  _atom_site_fract_x
+  _atom_site_fract_y
+  _atom_site_fract_z
+  _atom_site_occupancy
+  La  La1       1.0  0.007256668976406795  0.0010441066393209433  0.4992886262706134  1.0000
+  Ti  Ti1       1.0  0.5072565308932137  0.501044112895079  0.22442745691204669  1.0000
+  Ti  Ti2       1.0  0.507256491860502  0.5010441292733833  0.7741497773267075  1.0000
+  O   O1        1.0  0.0072565694430966185  0.5010441331104954  0.2787649913634878  1.0000
+  O   O2        1.0  0.007256556886365741  0.5010441526487027  0.7198122100617482  1.0000
+  O   O3        1.0  0.507256474143663  0.001044126964998839  0.27876497599747024  1.0000
+  O   O4        1.0  0.5072564678550082  0.0010441575412279897  0.719812211098516  1.0000
+  O   O5        1.0  0.5072565563740161  0.5010441585165529  0.9992886321877424  1.0000
+  O   O6        1.0  0.5072563705326503  0.5010441810990225  0.49928861258155255  1.0000
