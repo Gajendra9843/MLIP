@@ -1,0 +1,13 @@
+model_A,model_B,metric,difference_A_minus_B,ci95_low,ci95_high,bootstrap_p_two_sided,better_direction
+late_fusion_simplex_stack,standalone_Li_Wasserstein,MAE,-0.09236856509263447,-0.3189120020937889,0.11209685548925864,0.4128,negative
+late_fusion_simplex_stack,standalone_Li_Wasserstein,RMSE,-0.007404084592181004,-0.26069099448082717,0.2046344359537192,0.93,negative
+late_fusion_simplex_stack,standalone_Li_Wasserstein,R2,0.0033283263668013596,-0.0845601166814581,0.13589160889634025,0.93,positive
+late_fusion_simplex_stack,standalone_Li_Wasserstein,Spearman_rho,0.001885110773918619,-0.10634092528913783,0.1081439074327443,0.9512,positive
+early_fusion_fine_independent_bandwidths,standalone_Li_Wasserstein,MAE,0.14469953752593567,-0.21463128145905697,0.5032792036277515,0.422,negative
+early_fusion_fine_independent_bandwidths,standalone_Li_Wasserstein,RMSE,0.294292848222117,-0.10384645461400827,0.6820181153983178,0.1476,negative
+early_fusion_fine_independent_bandwidths,standalone_Li_Wasserstein,R2,-0.14103932670932218,-0.40697451209666674,0.05085179930533631,0.1476,positive
+early_fusion_fine_independent_bandwidths,standalone_Li_Wasserstein,Spearman_rho,-0.10740687290709228,-0.2738357706585865,0.04753764520129221,0.1768,positive
+published_additive_kernel,standalone_Li_Wasserstein,MAE,0.14380540351053894,-0.21700709303078566,0.48253680007404903,0.4392,negative
+published_additive_kernel,standalone_Li_Wasserstein,RMSE,0.28592291172355244,-0.08943379311144802,0.6074013459074833,0.1272,negative
+published_additive_kernel,standalone_Li_Wasserstein,R2,-0.13679228089432238,-0.3336697769023877,0.04589085836631277,0.1272,positive
+published_additive_kernel,standalone_Li_Wasserstein,Spearman_rho,-0.08020627965646732,-0.23265007761489703,0.07876127311435353,0.3228,positive

@@ -1,0 +1,2 @@
+case_id,reference_type,model_file,reference_file,model_frequency_column,model_intensity_column,reference_frequency_column,reference_intensity_column,spectrum_label,notes
+example_Li3PO4_LiPDOS,DFT_or_experiment_preprocessed,/content/drive/MyDrive/path/model_spectrum.csv,/content/drive/MyDrive/path/reference_spectrum.csv,Frequency_THz,Li_PDOS,frequency_THz,intensity,Li-PDOS,"For INS, model_file must already contain neutron-weighted and resolution-broadened intensity."

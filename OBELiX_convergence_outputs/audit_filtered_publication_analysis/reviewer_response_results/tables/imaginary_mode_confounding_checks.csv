@@ -1,0 +1,9 @@
+split,x,y,spearman_rho
+train,imaginary_area_fraction,log10_conductivity,-0.28458350870338955
+train,imaginary_area_fraction,Li_fraction_below_5THz,0.058382426688455696
+train,minimum_frequency_THz,log10_conductivity,0.4154925876313047
+train,minimum_frequency_THz,Li_fraction_below_5THz,0.14982964511695254
+test,imaginary_area_fraction,log10_conductivity,-0.13231104785847408
+test,imaginary_area_fraction,Li_fraction_below_5THz,0.21095683878629232
+test,minimum_frequency_THz,log10_conductivity,0.32368705968243605
+test,minimum_frequency_THz,Li_fraction_below_5THz,0.27073382544507163
