@@ -1,0 +1,14 @@
+metric,value
+Option-A spectra audited,311
+Train spectra audited,248
+Test spectra audited,63
+audit_status::PASS,169
+audit_status::PASS_INTEGERIZED_COMPOSITION,74
+audit_status::WARN_SHORT_DISTANCE,21
+audit_status::WARN_INTEGERIZATION_APPROXIMATION,20
+audit_status::FAIL_GENERAL_STOICHIOMETRY,11
+audit_status::FAIL_ELEMENT_SET,11
+audit_status::FAIL_LI_STOICHIOMETRY,4
+audit_status::FAIL_SEVERE_OVERLAP,1
+coarse DOS grid > 1 THz,24
+max plotted frequency > 300 THz,24

@@ -1,0 +1,2 @@
+ID,production_structure_file,source_structure_file,eigen_file,spectrum_file,notes
+replace_id,/content/drive/MyDrive/path/ultra_relaxed_generated.cif,/content/drive/MyDrive/path/ordered_adaptive_ID.cif,/content/drive/MyDrive/path/phonon_eigen_data.npz,/content/drive/MyDrive/path/Option_A.csv,Copy paths into STRUCTURE_OVERRIDES and rerun

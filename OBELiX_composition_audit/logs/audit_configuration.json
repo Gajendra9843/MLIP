@@ -1,0 +1,38 @@
+{
+  "generated_utc": "2026-07-21T20:27:09.068128+00:00",
+  "train_pdos_root": "/content/drive/.shortcut-targets-by-id/1_rZkiXnggqDBzgsITf1d7V4K_4aJ00gF",
+  "test_pdos_root": "/content/drive/.shortcut-targets-by-id/1uDZz5V21SkVn1nYYRn2QD8YrBPfGKoF1",
+  "search_roots": [
+    "/content/drive/.shortcut-targets-by-id/1_rZkiXnggqDBzgsITf1d7V4K_4aJ00gF",
+    "/content/drive/.shortcut-targets-by-id/1uDZz5V21SkVn1nYYRn2QD8YrBPfGKoF1",
+    "/content/drive/MyDrive/Train_cif",
+    "/content/drive/MyDrive/Test_cif"
+  ],
+  "n_option_A_spectra": 312,
+  "thresholds": {
+    "pass_max_relative_stoich_error": 0.05,
+    "warn_max_relative_stoich_error": 0.1,
+    "pass_max_absolute_count_error_atoms": 0.51,
+    "warn_max_absolute_count_error_atoms": 1.01,
+    "pass_total_variation_error": 0.05,
+    "warn_total_variation_error": 0.1,
+    "Li_pass_max_absolute_count_error_atoms": 0.51,
+    "Li_warn_max_absolute_count_error_atoms": 1.01,
+    "Li_stoichiometry_fail_threshold": 0.05,
+    "anchor_min_expected_count": 1.0,
+    "anchor_min_fraction_of_max": 0.05,
+    "severe_min_distance_A": 0.7,
+    "warning_min_distance_A": 1.0,
+    "coarse_DOS_grid_THz": 1.0,
+    "high_max_frequency_THz": 150.0,
+    "very_high_max_frequency_THz": 300.0,
+    "imaginary_thresholds_THz": [
+      -0.1,
+      -0.5,
+      -1.0
+    ],
+    "minimum_automatic_production_score": 300,
+    "minimum_automatic_source_score": 400
+  },
+  "manual_overrides": {}
+}

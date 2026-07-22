@@ -1,0 +1,4 @@
+split,ID,stage,file,error
+test,ku9,source_structure_parse,/content/drive/.shortcut-targets-by-id/1uDZz5V21SkVn1nYYRn2QD8YrBPfGKoF1/Test_cif_dos_code-2/ku9/ordered_adaptive_ku9.cif,Structure.from_file=Invalid CIF file with no structures!; CIF tolerance2=Invalid CIF file with no structures!
+test,na5,parse_expected_formula,,could not convert string to float: '1.0*'
+test,ozo,source_structure_parse,/content/drive/.shortcut-targets-by-id/1uDZz5V21SkVn1nYYRn2QD8YrBPfGKoF1/Test_cif_dos_code-2/ozo/ordered_adaptive_ozo.cif,Structure.from_file=Invalid CIF file with no structures!; CIF tolerance2=Invalid CIF file with no structures!
