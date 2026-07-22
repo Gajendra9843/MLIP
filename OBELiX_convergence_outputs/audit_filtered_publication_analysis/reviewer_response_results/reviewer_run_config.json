@@ -1,0 +1,36 @@
+{
+  "random_seed": 20260718,
+  "bootstrap_replicates": 5000,
+  "outer_folds": 5,
+  "inner_folds": 4,
+  "production_workflow": {
+    "supercell": [
+      2,
+      2,
+      2
+    ],
+    "displacement_A": 0.03,
+    "qmesh": [
+      15,
+      15,
+      15
+    ],
+    "total_DOS_definition": "sum of all atom-projected DOS from the same projected-DOS calculation",
+    "Li_PDOS_definition": "sum of Li atom-projected DOS from the same projected-DOS calculation"
+  },
+  "optional_manifests": {
+    "convergence_manifest": "/content/no_convergence_manifest.csv",
+    "reference_manifest": "/content/no_reference_manifest.csv"
+  },
+  "switches": {
+    "scalar_baselines": true,
+    "frequency_warp": true,
+    "stability_sensitivity": true,
+    "formal_tobit_kernel": true,
+    "fusion_ablations": true,
+    "family_analyses": true,
+    "optional_reference_comparisons": false,
+    "optional_phonon_convergence": false,
+    "optional_NAC": true
+  }
+}

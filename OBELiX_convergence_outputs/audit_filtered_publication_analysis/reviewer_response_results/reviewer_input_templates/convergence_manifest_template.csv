@@ -1,0 +1,2 @@
+ID,cif_path,Family,run_relaxation,nac_npz_path,notes
+replace_with_obelix_id,/content/drive/MyDrive/path/to/starting_or_relaxed.cif,argyrodite,True,,"nac_npz must contain born[natom,3,3], dielectric[3,3], factor[scalar]"
