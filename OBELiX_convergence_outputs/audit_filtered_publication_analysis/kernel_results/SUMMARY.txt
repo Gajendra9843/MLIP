@@ -1,0 +1,102 @@
+OBELiX PUBLICATION-LEVEL KERNEL ANALYSIS
+=======================================================
+Device: NVIDIA A100-SXM4-80GB
+Primary frequency representation: normalized 1-THz bins over 0 < nu <= 100 THz
+Primary censoring policy: limit
+Paired cohort: train=214, official test=48
+Leakage groups: connected components sharing reduced composition or DOI
+Nested CV: 5 outer x 4 inner grouped folds
+Bootstrap replicates: 5000; HSIC permutations: 5000
+
+OFFICIAL TEST PERFORMANCE
+                          label  n      MAE     RMSE        R2  Spearman_rho
+            Li-PDOS Wasserstein 48 1.899147 2.285146  0.485551      0.697551
+Static + Li + total Wasserstein 48 2.003267 2.498306  0.385098      0.634699
+        Static + Li Wasserstein 48 2.042952 2.571069  0.348758      0.617345
+                 Li-PDOS linear 48 2.139178 2.721778  0.270172      0.508542
+                  Total-DOS RBF 48 2.203209 2.989983  0.119251      0.398380
+                Li-PDOS CDF–RBF 48 2.244411 2.765706  0.246425      0.593789
+          Total-DOS Wasserstein 48 2.271455 3.022608  0.099925      0.363291
+                     Static RBF 48 2.330556 3.084285  0.062818      0.393756
+     Static + total Wasserstein 48 2.330556 3.084285  0.062818      0.393756
+              Total-DOS CDF–RBF 48 2.510197 3.334358 -0.095316      0.261017
+                Li-PDOS CLR–RBF 48 2.668269 3.477845 -0.191613      0.303939
+                    Li-PDOS RBF 48 2.894742 4.363743 -0.876001      0.447885
+
+HSIC TESTS
+                             component permutation_scheme  normalized_HSIC  permutation_p  null_mean  null_sd  n_permutations  permutation_p_BH_FDR
+                            static_rbf             global         0.237421       0.000200   0.032477 0.005991            5000              0.000240
+                            static_rbf      within_Family         0.237421       0.001200   0.191625 0.014689            5000              0.006399
+                                li_rbf             global         0.195985       0.000200   0.022136 0.006413            5000              0.000240
+                                li_rbf      within_Family         0.195985       0.000400   0.144729 0.013353            5000              0.004799
+                            li_clr_rbf             global         0.192078       0.000200   0.017706 0.006591            5000              0.000240
+                            li_clr_rbf      within_Family         0.192078       0.046191   0.170138 0.012321            5000              0.050390
+                            li_cdf_rbf             global         0.174180       0.000200   0.011181 0.006469            5000              0.000240
+                            li_cdf_rbf      within_Family         0.174180       0.002599   0.130229 0.014483            5000              0.007798
+                        li_wasserstein             global         0.182937       0.000200   0.011919 0.006269            5000              0.000240
+                        li_wasserstein      within_Family         0.182937       0.001600   0.138036 0.014363            5000              0.006399
+                             total_rbf             global         0.204055       0.000200   0.022497 0.006369            5000              0.000240
+                             total_rbf      within_Family         0.204055       0.208358   0.192879 0.013673            5000              0.208358
+                         total_cdf_rbf             global         0.162118       0.000200   0.011909 0.006460            5000              0.000240
+                         total_cdf_rbf      within_Family         0.162118       0.020396   0.135383 0.012465            5000              0.029327
+                     total_wasserstein             global         0.134786       0.000200   0.011937 0.006728            5000              0.000240
+                     total_wasserstein      within_Family         0.134786       0.005799   0.105973 0.010746            5000              0.013917
+   li_wasserstein__static_OOF_residual             global         0.055216       0.000400   0.014399 0.006549            5000              0.000436
+   li_wasserstein__static_OOF_residual      within_Family         0.055216       0.021996   0.041606 0.006202            5000              0.029327
+total_wasserstein__static_OOF_residual             global         0.084406       0.000200   0.014075 0.006540            5000              0.000240
+total_wasserstein__static_OOF_residual      within_Family         0.084406       0.008598   0.064087 0.008019            5000              0.014740
+       li_cdf_rbf__static_OOF_residual             global         0.053724       0.001000   0.013453 0.006389            5000              0.001000
+       li_cdf_rbf__static_OOF_residual      within_Family         0.053724       0.037193   0.040718 0.006652            5000              0.044631
+    total_cdf_rbf__static_OOF_residual             global         0.089995       0.000200   0.014336 0.006560            5000              0.000240
+    total_cdf_rbf__static_OOF_residual      within_Family         0.089995       0.007598   0.070067 0.007830            5000              0.014740
+
+LI VS TOTAL WASSERSTEIN HSIC
+ HSIC_Li  HSIC_total  difference_Li_minus_total  one_sided_permutation_p  null_ci95_low  null_ci95_high
+0.182937    0.134786                   0.048151                   0.0006       -0.01792        0.016607
+
+PAIRED BOOTSTRAP DIFFERENCES VS STATIC
+                        model   baseline       metric  difference_model_minus_baseline  ci95_low  ci95_high  bootstrap_p_two_sided better_direction
+                    li_linear static_rbf          MAE                        -0.191377 -0.796920   0.393564                 0.5464         negative
+                    li_linear static_rbf         RMSE                        -0.362507 -0.952968   0.226310                 0.2400         negative
+                    li_linear static_rbf           R2                         0.207354 -0.146787   0.640701                 0.2400         positive
+                    li_linear static_rbf Spearman_rho                         0.114787 -0.217441   0.431036                 0.5012         positive
+                       li_rbf static_rbf          MAE                         0.564186 -0.330854   1.600768                 0.2532         negative
+                       li_rbf static_rbf         RMSE                         1.279458 -0.520150   3.392883                 0.3676         negative
+                       li_rbf static_rbf           R2                        -0.938820 -3.958288   0.308675                 0.3676         positive
+                       li_rbf static_rbf Spearman_rho                         0.054129 -0.290627   0.395679                 0.7664         positive
+                   li_clr_rbf static_rbf          MAE                         0.337714 -0.160373   0.841337                 0.1928         negative
+                   li_clr_rbf static_rbf         RMSE                         0.393560 -0.078974   0.853217                 0.1064         negative
+                   li_clr_rbf static_rbf           R2                        -0.254431 -0.553872   0.059408                 0.1064         positive
+                   li_clr_rbf static_rbf Spearman_rho                        -0.089816 -0.355873   0.185806                 0.5080         positive
+                   li_cdf_rbf static_rbf          MAE                        -0.086144 -0.702383   0.500554                 0.7800         negative
+                   li_cdf_rbf static_rbf         RMSE                        -0.318579 -0.912851   0.300091                 0.2992         negative
+                   li_cdf_rbf static_rbf           R2                         0.183606 -0.190913   0.625993                 0.2992         positive
+                   li_cdf_rbf static_rbf Spearman_rho                         0.200033 -0.128922   0.531216                 0.2268         positive
+               li_wasserstein static_rbf          MAE                        -0.431409 -0.947580   0.085273                 0.0968         negative
+               li_wasserstein static_rbf         RMSE                        -0.799139 -1.271091  -0.284776                 0.0032         negative
+               li_wasserstein static_rbf           R2                         0.422732  0.147322   0.862520                 0.0032         positive
+               li_wasserstein static_rbf Spearman_rho                         0.303795  0.049078   0.561046                 0.0168         positive
+                    total_rbf static_rbf          MAE                        -0.127346 -0.636284   0.408966                 0.6308         negative
+                    total_rbf static_rbf         RMSE                        -0.094302 -0.674877   0.445837                 0.7292         negative
+                    total_rbf static_rbf           R2                         0.056433 -0.263546   0.502075                 0.7292         positive
+                    total_rbf static_rbf Spearman_rho                         0.004624 -0.325237   0.331289                 0.9800         positive
+                total_cdf_rbf static_rbf          MAE                         0.179642 -0.345158   0.735275                 0.5416         negative
+                total_cdf_rbf static_rbf         RMSE                         0.250074 -0.544814   1.002230                 0.5884         negative
+                total_cdf_rbf static_rbf           R2                        -0.158134 -0.557059   0.416466                 0.5884         positive
+                total_cdf_rbf static_rbf Spearman_rho                        -0.132739 -0.499160   0.243507                 0.4996         positive
+            total_wasserstein static_rbf          MAE                        -0.059101 -0.596269   0.497901                 0.8248         negative
+            total_wasserstein static_rbf         RMSE                        -0.061677 -0.661509   0.523083                 0.8184         negative
+            total_wasserstein static_rbf           R2                         0.037107 -0.307453   0.491224                 0.8184         positive
+            total_wasserstein static_rbf Spearman_rho                        -0.030465 -0.342104   0.264408                 0.8436         positive
+   static_plus_li_wasserstein static_rbf          MAE                        -0.287604 -0.629215   0.035664                 0.0840         negative
+   static_plus_li_wasserstein static_rbf         RMSE                        -0.513216 -0.791552  -0.213882                 0.0012         negative
+   static_plus_li_wasserstein static_rbf           R2                         0.285940  0.112127   0.580663                 0.0012         positive
+   static_plus_li_wasserstein static_rbf Spearman_rho                         0.223589  0.053146   0.420780                 0.0052         positive
+static_plus_total_wasserstein static_rbf          MAE                         0.000000  0.000000   0.000000                 1.0000         negative
+static_plus_total_wasserstein static_rbf         RMSE                         0.000000  0.000000   0.000000                 1.0000         negative
+static_plus_total_wasserstein static_rbf           R2                         0.000000  0.000000   0.000000                 1.0000         positive
+static_plus_total_wasserstein static_rbf Spearman_rho                         0.000000  0.000000   0.000000                 1.0000         positive
+    static_plus_li_plus_total static_rbf          MAE                        -0.327289 -0.682037   0.007323                 0.0552         negative
+    static_plus_li_plus_total static_rbf         RMSE                        -0.585979 -0.875376  -0.272080                 0.0004         negative
+    static_plus_li_plus_total static_rbf           R2                         0.322280  0.141936   0.634426                 0.0004         positive
+    static_plus_li_plus_total static_rbf Spearman_rho                         0.240943  0.062615   0.440165                 0.0032         positive

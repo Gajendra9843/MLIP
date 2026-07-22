@@ -1,0 +1,6 @@
+stage,train,test
+Official OBELiX,478,121
+Paired spectra,248,64
+Primary cohort,214,48
+Strict cohort,200,43
+Exact cohort,134,35

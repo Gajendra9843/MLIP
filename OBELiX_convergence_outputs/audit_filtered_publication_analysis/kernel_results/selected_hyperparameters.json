@@ -1,0 +1,190 @@
+{
+  "static_rbf": {
+    "label": "Static RBF",
+    "components": [
+      "static_rbf"
+    ],
+    "best_full": {
+      "scale_mult": 1.0,
+      "alpha": 0.1,
+      "cv_MAE": 1.680273308110939,
+      "cv_MAE_sd": 0.3245340733045307,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "li_linear": {
+    "label": "Li-PDOS linear",
+    "components": [
+      "li_linear"
+    ],
+    "best_full": {
+      "scale_mult": 1.0,
+      "alpha": 2.154434690031882,
+      "cv_MAE": 2.283258764652221,
+      "cv_MAE_sd": 0.3014299060932665,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "li_rbf": {
+    "label": "Li-PDOS RBF",
+    "components": [
+      "li_rbf"
+    ],
+    "best_full": {
+      "scale_mult": 2.0,
+      "alpha": 0.004641588833612777,
+      "cv_MAE": 1.7204728428506346,
+      "cv_MAE_sd": 0.3735080004055817,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "li_clr_rbf": {
+    "label": "Li-PDOS CLR\u2013RBF",
+    "components": [
+      "li_clr_rbf"
+    ],
+    "best_full": {
+      "scale_mult": 0.5,
+      "alpha": 0.1,
+      "cv_MAE": 1.6613595933194398,
+      "cv_MAE_sd": 0.26889761229882525,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "li_cdf_rbf": {
+    "label": "Li-PDOS CDF\u2013RBF",
+    "components": [
+      "li_cdf_rbf"
+    ],
+    "best_full": {
+      "scale_mult": 2.0,
+      "alpha": 0.004641588833612777,
+      "cv_MAE": 1.6023584253026937,
+      "cv_MAE_sd": 0.39181516249787,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "li_wasserstein": {
+    "label": "Li-PDOS Wasserstein",
+    "components": [
+      "li_wasserstein"
+    ],
+    "best_full": {
+      "scale_mult": 1.0,
+      "alpha": 0.1,
+      "cv_MAE": 1.6941830993937244,
+      "cv_MAE_sd": 0.2797082603798994,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "total_rbf": {
+    "label": "Total-DOS RBF",
+    "components": [
+      "total_rbf"
+    ],
+    "best_full": {
+      "scale_mult": 0.5,
+      "alpha": 0.1,
+      "cv_MAE": 1.6348087042779325,
+      "cv_MAE_sd": 0.34537110157103973,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "total_cdf_rbf": {
+    "label": "Total-DOS CDF\u2013RBF",
+    "components": [
+      "total_cdf_rbf"
+    ],
+    "best_full": {
+      "scale_mult": 0.25,
+      "alpha": 0.1,
+      "cv_MAE": 1.8363851058527412,
+      "cv_MAE_sd": 0.3923544686430958,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "total_wasserstein": {
+    "label": "Total-DOS Wasserstein",
+    "components": [
+      "total_wasserstein"
+    ],
+    "best_full": {
+      "scale_mult": 0.5,
+      "alpha": 0.1,
+      "cv_MAE": 1.9570423640197327,
+      "cv_MAE_sd": 0.471265231805286,
+      "weights": [
+        1.0
+      ]
+    }
+  },
+  "static_plus_li_wasserstein": {
+    "label": "Static + Li Wasserstein",
+    "components": [
+      "static_rbf",
+      "li_wasserstein"
+    ],
+    "best_full": {
+      "scale_mult": 1.0,
+      "alpha": 0.1,
+      "cv_MAE": 1.5996040536882132,
+      "cv_MAE_sd": 0.3100868129921365,
+      "weights": [
+        0.3999999999999999,
+        0.6000000000000001
+      ]
+    }
+  },
+  "static_plus_total_wasserstein": {
+    "label": "Static + total Wasserstein",
+    "components": [
+      "static_rbf",
+      "total_wasserstein"
+    ],
+    "best_full": {
+      "scale_mult": 1.0,
+      "alpha": 0.1,
+      "cv_MAE": 1.680273308110939,
+      "cv_MAE_sd": 0.3245340733045307,
+      "weights": [
+        1.0,
+        0.0
+      ]
+    }
+  },
+  "static_plus_li_plus_total": {
+    "label": "Static + Li + total Wasserstein",
+    "components": [
+      "static_rbf",
+      "li_wasserstein",
+      "total_wasserstein"
+    ],
+    "best_full": {
+      "scale_mult": 1.0,
+      "alpha": 0.1,
+      "cv_MAE": 1.5988064815355942,
+      "cv_MAE_sd": 0.3256297381521397,
+      "weights": [
+        0.25,
+        0.75,
+        0.0
+      ]
+    }
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "input_zip": "/content/OBELiX_DOS_PDOS_association_outputs.zip",
+  "device": "NVIDIA A100-SXM4-80GB",
+  "primary_bin_width_THz": 1.0,
+  "frequency_range_THz": [
+    0.0,
+    100.0
+  ],
+  "primary_censor_policy": "limit",
+  "random_seed": 20260718,
+  "outer_folds": 5,
+  "inner_folds": 4,
+  "alpha_grid": [
+    9.999999999999999e-06,
+    0.00021544346900318823,
+    0.004641588833612777,
+    0.1,
+    2.154434690031882,
+    46.41588833612773,
+    1000.0
+  ],
+  "single_kernel_scale_grid": [
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0
+  ],
+  "additive_kernel_scale_grid": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "wasserstein_quantiles": 256,
+  "clr_pseudocount": 1e-08,
+  "n_bootstrap": 5000,
+  "n_hsic_permutations": 5000,
+  "models": {
+    "static_rbf": {
+      "label": "Static RBF",
+      "components": [
+        "static_rbf"
+      ],
+      "additive": false
+    },
+    "li_linear": {
+      "label": "Li-PDOS linear",
+      "components": [
+        "li_linear"
+      ],
+      "additive": false
+    },
+    "li_rbf": {
+      "label": "Li-PDOS RBF",
+      "components": [
+        "li_rbf"
+      ],
+      "additive": false
+    },
+    "li_clr_rbf": {
+      "label": "Li-PDOS CLR\u2013RBF",
+      "components": [
+        "li_clr_rbf"
+      ],
+      "additive": false
+    },
+    "li_cdf_rbf": {
+      "label": "Li-PDOS CDF\u2013RBF",
+      "components": [
+        "li_cdf_rbf"
+      ],
+      "additive": false
+    },
+    "li_wasserstein": {
+      "label": "Li-PDOS Wasserstein",
+      "components": [
+        "li_wasserstein"
+      ],
+      "additive": false
+    },
+    "total_rbf": {
+      "label": "Total-DOS RBF",
+      "components": [
+        "total_rbf"
+      ],
+      "additive": false
+    },
+    "total_cdf_rbf": {
+      "label": "Total-DOS CDF\u2013RBF",
+      "components": [
+        "total_cdf_rbf"
+      ],
+      "additive": false
+    },
+    "total_wasserstein": {
+      "label": "Total-DOS Wasserstein",
+      "components": [
+        "total_wasserstein"
+      ],
+      "additive": false
+    },
+    "static_plus_li_wasserstein": {
+      "label": "Static + Li Wasserstein",
+      "components": [
+        "static_rbf",
+        "li_wasserstein"
+      ],
+      "additive": true
+    },
+    "static_plus_total_wasserstein": {
+      "label": "Static + total Wasserstein",
+      "components": [
+        "static_rbf",
+        "total_wasserstein"
+      ],
+      "additive": true
+    },
+    "static_plus_li_plus_total": {
+      "label": "Static + Li + total Wasserstein",
+      "components": [
+        "static_rbf",
+        "li_wasserstein",
+        "total_wasserstein"
+      ],
+      "additive": true
+    }
+  }
+}

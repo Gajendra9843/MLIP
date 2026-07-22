@@ -1,0 +1,4501 @@
+# OBELiX REVIEWER-RESPONSE MASTER WORKFLOW
+# One Google Colab cell: raw Drive spectra -> association -> kernels ->
+# reviewer analyses -> optional phonon convergence/NAC/reference checks.
+#
+# The production spectra are assumed to be the unified Option-A exports:
+# Frequency_THz, Total_DOS (= sum of all atom PDOS), and Li_PDOS
+# generated from the same 15x15x15 eigenvector mesh.
+# ======================================================================
+
+# ---------------------------- MASTER CONFIG ----------------------------
+FINAL_OUTPUT_DRIVE_DIR = r"/content/drive/MyDrive/OBELiX_convergence_outputs/audit_filtered_publication_analysis"
+FINAL_ZIP_NAME = "OBELiX_audit_filtered_publication_outputs.zip"
+
+# Optional input manifests. Templates are created automatically in
+# FINAL_OUTPUT_DRIVE_DIR/reviewer_input_templates when files are absent.
+CONVERGENCE_MANIFEST = r"/content/no_convergence_manifest.csv"
+REFERENCE_MANIFEST = r"/content/no_reference_manifest.csv"
+
+
+# Set exact package versions here once recovered from the production run.
+# Leaving a package unpinned installs the current release and is appropriate
+# only for exploratory convergence tests, not the archival production record.
+MATTERSIM_PACKAGE_SPEC = "mattersim"
+PHONOPY_PACKAGE_SPEC = "phonopy"
+ASE_PACKAGE_SPEC = "ase"
+PYMATGEN_PACKAGE_SPEC = "pymatgen"
+
+# Publication analysis switches.
+RUN_REVIEWER_SCALAR_BASELINES = True
+RUN_REVIEWER_FREQUENCY_WARP = True
+RUN_REVIEWER_STABILITY_SENSITIVITY = True
+RUN_REVIEWER_TOBIT_KERNEL = True
+RUN_REVIEWER_FUSION_ABLATIONS = True
+RUN_REVIEWER_FAMILY_ANALYSES = True
+RUN_OPTIONAL_REFERENCE_COMPARISONS = False
+RUN_OPTIONAL_PHONON_CONVERGENCE = False
+RUN_OPTIONAL_NAC = True                  # requires nac_npz_path in manifest
+
+# Publication defaults. Lower only for debugging.
+REVIEWER_RANDOM_SEED = 20260718
+REVIEWER_BOOTSTRAP = 5000
+REVIEWER_OUTER_FOLDS = 5
+REVIEWER_INNER_FOLDS = 4
+REVIEWER_MIN_FAMILY_N = 5
+REVIEWER_FIG_DPI = 600
+
+# Representative convergence settings. Production is 2x2x2, 0.03 A, 15^3.
+CONVERGENCE_SUPERCELLS = ((2, 2, 2), (3, 3, 3))
+CONVERGENCE_DISPLACEMENTS_A = (0.01, 0.02, 0.03)
+CONVERGENCE_QMESHES = ((15, 15, 15), (20, 20, 20), (25, 25, 25))
+PRODUCTION_SUPERCELL = (2, 2, 2)
+PRODUCTION_DISPLACEMENT_A = 0.03
+PRODUCTION_QMESH = (15, 15, 15)
+CONVERGENCE_RELAX_STAGE1_FMAX = 1e-3
+CONVERGENCE_RELAX_STAGE2_FMAX = 5e-5
+
+
+# ================================================================
+# OBELiX total phonon DOS + Li-projected DOS association workflow
+# Single-cell Google Colab script
+# ================================================================
+
+# ------------------------- USER CONFIGURATION -------------------------
+# ---------------------- GOOGLE DRIVE CONFIGURATION ----------------------
+# Before running:
+# Google Drive -> Shared with me -> right-click "PDOS and DOS"
+# -> Organize -> Add shortcut -> My Drive
+
+MOUNT_POINT = "/content/drive"
+MYDRIVE_ROOT = "/content/drive/MyDrive"
+
+# Path to the shortcut created in My Drive.
+# Change this only if you placed the shortcut inside another My Drive folder.
+PDOS_DOS_DRIVE_FOLDER = "/content/drive/.shortcut-targets-by-id/1DjYaQ_hrY0kk_XPL7NMYO_wrYqOPoAxv"
+
+AUTO_DOWNLOAD_ZIP = False
+WORKDIR = "/content/obelix_dos_pdos_association"
+FORCE_REDOWNLOAD = False
+AUTO_DOWNLOAD_ZIP = False
+
+# Frequency preprocessing: every structure is retained if it has readable data
+# in this interval. Negative-frequency points are recorded but never used to
+# reject a structure.
+FREQ_MIN_THz = 0.0               # strict condition is frequency > 0
+FREQ_MAX_THz = 100.0             # frequency <= 100 THz
+FREQUENCY_SCALE_TO_THz = 1.0     # leave at 1.0 for Phonopy's usual THz output
+BIN_WIDTHS_THz = (0.5, 1.0, 2.0)
+PRIMARY_BIN_WIDTH_THz = 1.0
+
+# Conductivity values reported as upper limits, e.g. <1E-10, are treated at
+# their reporting limit in the primary analysis. Two sensitivity analyses are
+# also exported: half-limit substitution and exclusion of censored values.
+PRIMARY_CENSOR_POLICY = "limit"  # "limit", "half_limit", or "exclude"
+
+# Statistical settings. Raise these for final publication runs.
+RANDOM_SEED = 20260718
+N_BOOTSTRAP = 2000
+N_PERMUTATIONS = 5000
+N_MI_PERMUTATIONS = 500
+PERMUTATION_BATCH_SIZE = 128
+FDR_ALPHA = 0.05
+RUN_SPLINE_NONLINEARITY = True
+RUN_CONDITIONAL_ASSOCIATIONS = True
+RUN_PREDICTIVE_MODELS = True
+RUN_XGBOOST = True
+
+# PDOS parsing fallback. The official Phonopy projected_dos.dat contains one
+# column per atom (or 3 columns per atom for XYZ projection). The code first
+# searches nearby phonopy YAML/POSCAR/CIF metadata to identify Li columns.
+# Because the supplied Drive folders are stated to contain Li-projected DOS,
+# a metadata-free multi-column file is summed as a last resort and prominently
+# flagged in QC. Set to "error" to forbid that fallback.
+PDOS_MULTICOLUMN_FALLBACK = "error"  # or "error"
+TOTAL_DOS_COLUMN = 1                         # one-based among DOS columns after frequency
+
+# ------------------------- PACKAGE INSTALLATION -------------------------
+import sys, subprocess, os
+required = [
+    "pymatgen>=2024.5.1",
+    "dcor>=0.6",
+    "statsmodels>=0.14",
+    "xgboost>=2.0",
+    "pyyaml>=6.0",
+]
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *required])
+
+# ------------------------------- IMPORTS -------------------------------
+import re, json, math, shutil, warnings, traceback, zipfile, tarfile
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+import pandas as pd
+import yaml
+import matplotlib.pyplot as plt
+
+from matplotlib.figure import Figure as _OBELIX_Figure
+from matplotlib.axes import Axes as _OBELIX_Axes
+if not hasattr(_OBELIX_Figure, "_obelix_original_savefig"):
+    _OBELIX_Figure._obelix_original_savefig = _OBELIX_Figure.savefig
+if not hasattr(plt, "_obelix_original_savefig"):
+    plt._obelix_original_savefig = plt.savefig
+_OBELIX_Figure.savefig = lambda self, *args, **kwargs: None
+plt.savefig = lambda *args, **kwargs: None
+plt.title = lambda *args, **kwargs: None
+_OBELIX_Axes.set_title = lambda self, *args, **kwargs: None
+plt.rcParams.update({
+    "font.size": 12, "axes.labelsize": 14, "xtick.labelsize": 11.5,
+    "ytick.labelsize": 11.5, "legend.fontsize": 10.5,
+    "pdf.fonttype": 42, "ps.fonttype": 42,
+})
+
+from scipy import stats
+from scipy.integrate import cumulative_trapezoid
+from scipy.stats import rankdata
+from sklearn.base import clone
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression, Ridge, RidgeCV
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import GroupKFold, KFold, GridSearchCV, cross_val_predict
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import StandardScaler, SplineTransformer
+from sklearn.feature_selection import mutual_info_regression
+from statsmodels.stats.multitest import multipletests
+import dcor
+from pymatgen.core import Composition, Element, Structure
+
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+np.random.seed(RANDOM_SEED)
+
+try:
+    import torch
+    GPU_AVAILABLE = bool(torch.cuda.is_available())
+    DEVICE_NAME = torch.cuda.get_device_name(0) if GPU_AVAILABLE else "CPU"
+except Exception:
+    torch = None
+    GPU_AVAILABLE = False
+    DEVICE_NAME = "CPU"
+
+print(f"Compute device detected: {DEVICE_NAME}")
+print("GPU acceleration is used for permutation tests and XGBoost when CUDA is available.")
+
+# ----------------------------- DIRECTORIES -----------------------------
+ROOT = Path(WORKDIR)
+DOWNLOAD_ROOT = ROOT / "downloads"
+RESULTS = ROOT / "results"
+FIGURES = RESULTS / "figures"
+TABLES = RESULTS / "tables"
+FEATURES_DIR = RESULTS / "features"
+ASSOC_DIR = RESULTS / "associations"
+for p in [DOWNLOAD_ROOT, RESULTS, FIGURES, TABLES, FEATURES_DIR, ASSOC_DIR]:
+    p.mkdir(parents=True, exist_ok=True)
+
+# -------------------- MOUNT AND RESOLVE DRIVE DATA --------------------
+from google.colab import drive
+from pathlib import Path
+import os
+import re
+
+MOUNT_POINT = "/content/drive"
+MYDRIVE_ROOT = Path(MOUNT_POINT) / "MyDrive"
+SHORTCUT_ROOT = Path(MOUNT_POINT) / ".shortcut-targets-by-id"
+
+drive.mount(MOUNT_POINT, force_remount=True)
+
+# ----------------------------------------------------------------------
+# Your current Google Drive folders.
+# Each material subfolder, e.g. 122/, aab/, 6ji/, contains BOTH:
+#   Lithium_PDOS_<material_id>.csv
+#   Total_DOS_<material_id>.csv
+# ----------------------------------------------------------------------
+TRAIN_ROOT = Path(r"/content/obelix_audit_filtered_spectra/Train_cif")
+TEST_ROOT = Path(r"/content/obelix_audit_filtered_spectra/Test_cif")
+
+# If direct folder-ID paths do not work in your Colab session, comment the two
+# lines above and uncomment these two MyDrive paths instead:
+# TRAIN_ROOT = Path(r"/content/obelix_audit_filtered_spectra/Train_cif")
+# TEST_ROOT = Path(r"/content/obelix_audit_filtered_spectra/Test_cif")
+
+
+def usable_directory(path):
+    """True when Drive exposes path as a readable directory."""
+    try:
+        return Path(path).exists() and Path(path).is_dir() and os.access(path, os.R_OK)
+    except Exception:
+        return False
+
+
+def show_directory(path, max_entries=100):
+    path = Path(path)
+    print(f"\nContents of: {path}")
+    if not usable_directory(path):
+        print("  [not accessible]")
+        return
+    try:
+        entries = sorted(path.iterdir(), key=lambda p: p.name.lower())
+        for p in entries[:max_entries]:
+            kind = "DIR " if p.is_dir() else "FILE"
+            print(f"  {kind}  {repr(p.name)}")
+        if len(entries) > max_entries:
+            print(f"  ... and {len(entries) - max_entries} more entries")
+    except Exception as exc:
+        print(f"  Could not list directory: {exc}")
+
+
+def check_folder(root, label):
+    root = Path(root)
+    if not usable_directory(root):
+        print("\nTop-level MyDrive folders:")
+        show_directory(MYDRIVE_ROOT, max_entries=100)
+        print("\nVisible shortcut-target IDs:")
+        show_directory(SHORTCUT_ROOT, max_entries=100)
+        raise FileNotFoundError(
+            f"{label} folder not found or not readable:\n{root}\n\n"
+            "If this is a shared folder, add a shortcut to My Drive or run Colab "
+            "with the Google account that has access."
+        )
+
+    li_files = sorted(root.rglob("Lithium_PDOS_*.csv"))
+    total_files = sorted(root.rglob("Total_DOS_*.csv"))
+
+    print(f"{label}: {root}")
+    print(f"  Li PDOS files: {len(li_files)}")
+    print(f"  Total DOS files: {len(total_files)}")
+
+    if len(li_files) == 0:
+        raise RuntimeError(f"No Lithium_PDOS_*.csv files found in {root}")
+    if len(total_files) == 0:
+        raise RuntimeError(f"No Total_DOS_*.csv files found in {root}")
+
+
+check_folder(TRAIN_ROOT, "TRAIN")
+check_folder(TEST_ROOT, "TEST")
+
+# Your new folders contain both Li-PDOS and Total-DOS files, so PDOS and DOS
+# roots are the same for each split. Downstream calculation code remains the same.
+TRAIN_PDOS_ROOT = TRAIN_ROOT
+TRAIN_DOS_ROOT = TRAIN_ROOT
+TEST_PDOS_ROOT = TEST_ROOT
+TEST_DOS_ROOT = TEST_ROOT
+
+FOLDER_SPECS = {
+    ("train", "pdos"): (None, TRAIN_PDOS_ROOT),
+    ("train", "dos"):  (None, TRAIN_DOS_ROOT),
+    ("test",  "pdos"): (None, TEST_PDOS_ROOT),
+    ("test",  "dos"):  (None, TEST_DOS_ROOT),
+}
+
+print("\nResolved dataset folders")
+print("-" * 80)
+for (split, mode), (_, root) in FOLDER_SPECS.items():
+    file_count = sum(1 for p in Path(root).rglob("*") if p.is_file())
+    print(
+        f"{split.upper():5s} {mode.upper():4s}: "
+        f"{file_count:,} files\n"
+        f"  {root}"
+    )
+
+print("\nAll folders are accessible. No files will be downloaded.")
+# --------------------------- HELPER FUNCTIONS --------------------------
+def folder_has_files(path: Path) -> bool:
+    return path.exists() and any(p.is_file() for p in path.rglob("*"))
+
+
+def download_public_folder(url: str, destination: Path):
+    if FORCE_REDOWNLOAD and destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    if folder_has_files(destination):
+        print(f"Using existing download: {destination}")
+        return
+    print(f"Downloading public Drive folder into: {destination}")
+    try:
+        gdown.download_folder(url=url, output=str(destination), quiet=False, use_cookies=False)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download {url}. Verify that every item is shared as "
+            "'Anyone with the link — Viewer'. Original error: {exc}"
+        ) from exc
+    if not folder_has_files(destination):
+        raise RuntimeError(f"No files were downloaded from {url}")
+
+
+def extract_archives_recursively(root: Path):
+    """Extract archives found in downloaded folders; harmless if none exist."""
+    archives = [p for p in root.rglob("*") if p.is_file() and (
+        p.suffix.lower() == ".zip" or p.name.lower().endswith((".tar.gz", ".tgz", ".tar"))
+    )]
+    for arc in archives:
+        out = arc.parent / f"{arc.stem}_extracted"
+        marker = out / ".extracted_ok"
+        if marker.exists():
+            continue
+        out.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.unpack_archive(str(arc), str(out))
+            marker.touch()
+            print(f"Extracted archive: {arc.name}")
+        except Exception as exc:
+            print(f"WARNING: could not extract {arc}: {exc}")
+
+
+def normalize_id(x):
+    return str(x).strip().lower()
+
+
+def parse_conductivity(value):
+    """Return (reported numeric limit/value, censor flag, comparator)."""
+    if pd.isna(value):
+        return np.nan, False, ""
+    s = str(value).strip().replace("−", "-").replace("×", "x")
+    comparator = "<" if "<" in s else (">" if ">" in s else "")
+    # Handles forms such as 1E-10, 1e-10, and 1 x 10^-10.
+    s2 = re.sub(r"([0-9.]+)\s*[xX]\s*10\s*\^?\s*([-+]?\d+)", r"\1e\2", s)
+    match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", s2)
+    if not match:
+        return np.nan, False, comparator
+    try:
+        val = float(match.group(0))
+    except Exception:
+        return np.nan, False, comparator
+    return val, comparator == "<", comparator
+
+
+def prepare_obelix(df: pd.DataFrame, split: str) -> pd.DataFrame:
+    df = df.copy()
+    df["ID"] = df["ID"].map(normalize_id)
+    parsed = df["Ionic conductivity (S cm-1)"].map(parse_conductivity)
+    df["ic_reported"] = [x[0] for x in parsed]
+    df["ic_is_upper_limit"] = [x[1] for x in parsed]
+    df["ic_comparator"] = [x[2] for x in parsed]
+    df.loc[df["ic_reported"] <= 0, "ic_reported"] = np.nan
+    df["ic_limit"] = df["ic_reported"]
+    df["ic_half_limit"] = np.where(df["ic_is_upper_limit"], 0.5 * df["ic_reported"], df["ic_reported"])
+    df["ic_exclude"] = np.where(df["ic_is_upper_limit"], np.nan, df["ic_reported"])
+    for policy in ["limit", "half_limit", "exclude"]:
+        df[f"log10_ic_{policy}"] = np.log10(df[f"ic_{policy}"].astype(float))
+    df["split"] = split
+    return df
+
+
+def target_column(policy: str) -> str:
+    if policy not in {"limit", "half_limit", "exclude"}:
+        raise ValueError(f"Unknown censor policy: {policy}")
+    return f"log10_ic_{policy}"
+
+
+def safe_numeric_table(path: Path):
+    """Read a whitespace/comma/tab/semicolon numeric table robustly."""
+    best = None
+    for delim in [None, ",", "\t", ";"]:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                arr = np.genfromtxt(path, comments="#", delimiter=delim, invalid_raise=False, dtype=float)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            if arr.ndim != 2:
+                continue
+            arr = arr[:, ~np.all(~np.isfinite(arr), axis=0)]
+            if arr.shape[1] < 2:
+                continue
+            arr = arr[np.isfinite(arr[:, 0])]
+            if len(arr) >= 2 and (best is None or arr.shape[1] > best.shape[1]):
+                best = arr
+        except Exception:
+            pass
+    if best is None:
+        raise ValueError("No readable numeric table with >=2 columns")
+    return best
+
+
+def collect_symbol_lists(obj, path="root"):
+    found = []
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            new_path = f"{path}/{key}"
+            if key in {"points", "atoms"} and isinstance(val, list) and val:
+                symbols = []
+                ok = True
+                for item in val:
+                    if not isinstance(item, dict):
+                        ok = False; break
+                    sym = item.get("symbol", item.get("element", item.get("name")))
+                    if sym is None:
+                        ok = False; break
+                    symbols.append(str(sym))
+                if ok and symbols:
+                    found.append((new_path, symbols))
+            found.extend(collect_symbol_lists(val, new_path))
+    elif isinstance(obj, list):
+        for i, val in enumerate(obj):
+            found.extend(collect_symbol_lists(val, f"{path}/{i}"))
+    return found
+
+
+def symbols_from_yaml(path: Path):
+    try:
+        with open(path, "r", errors="ignore") as f:
+            data = yaml.safe_load(f)
+        candidates = collect_symbol_lists(data)
+        # Prefer primitive cell, then unit cell, then other lists.
+        candidates.sort(key=lambda z: (0 if "primitive" in z[0].lower() else 1 if "unit" in z[0].lower() else 2, len(z[1])))
+        return [(symbols, f"yaml:{path.name}:{where}") for where, symbols in candidates]
+    except Exception:
+        return []
+
+
+def symbols_from_poscar(path: Path):
+    try:
+        lines = [x.strip() for x in path.read_text(errors="ignore").splitlines() if x.strip()]
+        if len(lines) < 7:
+            return []
+        elem_tokens = lines[5].split()
+        count_tokens = lines[6].split()
+        if not elem_tokens or not count_tokens:
+            return []
+        if all(re.fullmatch(r"[A-Za-z]{1,3}", x) for x in elem_tokens) and all(re.fullmatch(r"\d+", x) for x in count_tokens):
+            counts = [int(x) for x in count_tokens]
+            if len(counts) == len(elem_tokens):
+                symbols = [e for e, n in zip(elem_tokens, counts) for _ in range(n)]
+                return [(symbols, f"poscar:{path.name}")]
+    except Exception:
+        pass
+    return []
+
+
+def symbols_from_structure(path: Path):
+    try:
+        structure = Structure.from_file(str(path))
+        symbols = []
+        for site in structure:
+            # Mark a partially occupied site as Li when Li is one of its species.
+            species_names = [el.symbol for el in site.species.elements]
+            symbols.append("Li" if "Li" in species_names else species_names[0])
+        return [(symbols, f"structure:{path.name}")]
+    except Exception:
+        return []
+
+
+def nearby_metadata_candidates(data_path: Path, collection_root: Path):
+    dirs = []
+    d = data_path.parent
+    collection_root = collection_root.resolve()
+    while True:
+        dirs.append(d)
+        if d.resolve() == collection_root or d.parent == d:
+            break
+        try:
+            if collection_root not in d.resolve().parents and d.resolve() != collection_root:
+                break
+        except Exception:
+            break
+        d = d.parent
+    files = []
+    for directory in dirs:
+        for name in ["phonopy.yaml", "phonopy_disp.yaml", "phonopy_params.yaml", "PPOSCAR", "POSCAR", "CONTCAR"]:
+            q = directory / name
+            if q.exists() and q.is_file():
+                files.append(q)
+        files.extend(sorted(directory.glob("*.cif"))[:5])
+    # preserve order while removing duplicates
+    unique = []
+    seen = set()
+    for f in files:
+        s = str(f.resolve())
+        if s not in seen:
+            unique.append(f); seen.add(s)
+    return unique
+
+
+def infer_symbols(data_path: Path, collection_root: Path, n_density_cols: int):
+    all_candidates = []
+    for meta in nearby_metadata_candidates(data_path, collection_root):
+        lname = meta.name.lower()
+        if lname.endswith((".yaml", ".yml")):
+            all_candidates.extend(symbols_from_yaml(meta))
+        elif lname in {"poscar", "contcar", "pposcar"}:
+            all_candidates.extend(symbols_from_poscar(meta))
+        elif lname.endswith(".cif"):
+            all_candidates.extend(symbols_from_structure(meta))
+    matching = []
+    for symbols, source in all_candidates:
+        if len(symbols) == n_density_cols:
+            matching.append((0, symbols, source, "atom"))
+        if 3 * len(symbols) == n_density_cols:
+            matching.append((1, symbols, source, "xyz"))
+    if not matching:
+        return None, None, None
+    matching.sort(key=lambda x: x[0])
+    _, symbols, source, projection = matching[0]
+    return symbols, source, projection
+
+
+def select_density(arr: np.ndarray, path: Path, mode: str, collection_root: Path):
+    freq = arr[:, 0].astype(float) * FREQUENCY_SCALE_TO_THz
+    D = arr[:, 1:].astype(float)
+    nden = D.shape[1]
+    if mode == "dos":
+        col = TOTAL_DOS_COLUMN - 1
+        if col < 0 or col >= nden:
+            raise ValueError(f"TOTAL_DOS_COLUMN={TOTAL_DOS_COLUMN} incompatible with {nden} density columns")
+        dens = D[:, col]
+        parse_mode = f"total_column_{TOTAL_DOS_COLUMN}"
+        metadata_source = ""
+    elif mode == "pdos":
+        if nden == 1:
+            dens = D[:, 0]
+            parse_mode = "single_Li_PDOS_column"
+            metadata_source = "not_needed"
+        else:
+            symbols, metadata_source, projection = infer_symbols(path, collection_root, nden)
+            if symbols is not None:
+                li_atoms = [i for i, s in enumerate(symbols) if str(s).strip().lower() == "li"]
+                if not li_atoms:
+                    raise ValueError(f"Metadata found but no Li atoms identified ({metadata_source})")
+                if projection == "atom":
+                    cols = li_atoms
+                else:
+                    cols = [3 * i + j for i in li_atoms for j in range(3)]
+                dens = np.nansum(D[:, cols], axis=1)
+                parse_mode = f"Li_columns_from_{projection}_resolved_PDOS"
+            elif PDOS_MULTICOLUMN_FALLBACK == "sum_all_as_Li":
+                dens = np.nansum(D, axis=1)
+                parse_mode = "FALLBACK_sum_all_columns_as_Li"
+                metadata_source = "NO_MATCHING_METADATA"
+            else:
+                raise ValueError(
+                    f"PDOS has {nden} density columns but Li columns could not be identified. "
+                    "Provide phonopy.yaml/POSCAR/CIF metadata or enable fallback."
+                )
+    else:
+        raise ValueError(mode)
+    return freq, dens, nden, parse_mode, metadata_source
+
+def normalize_header_name(name):
+    """Normalize a table header for robust matching."""
+    return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
+
+
+def read_named_spectrum_table(path: Path, mode: str):
+    """
+    Read spectrum files containing explicit column headers.
+
+    Expected preferred columns:
+        Frequency_THz
+        Total_DOS
+        Li_PDOS
+
+    For mode='dos', only Total_DOS is selected.
+    For mode='pdos', only Li_PDOS is selected.
+
+    Returns None when recognizable headers are not present, allowing the
+    original Phonopy .dat parser to be used as a fallback.
+    """
+    try:
+        # sep=None allows pandas to infer comma, tab, or whitespace separators.
+        df = pd.read_csv(
+            path,
+            sep=None,
+            engine="python",
+            comment="#"
+        )
+    except Exception:
+        return None
+
+    if df is None or df.empty or len(df.columns) < 2:
+        return None
+
+    original_columns = list(df.columns)
+    normalized = {
+        col: normalize_header_name(col)
+        for col in original_columns
+    }
+
+    # Identify frequency column.
+    frequency_aliases = {
+        "frequencythz",
+        "frequency",
+        "freqthz",
+        "freq",
+        "phononfrequencythz",
+    }
+
+    frequency_columns = [
+        col for col, norm in normalized.items()
+        if norm in frequency_aliases
+    ]
+
+    if not frequency_columns:
+        return None
+
+    frequency_column = frequency_columns[0]
+
+    if mode == "dos":
+        # Prefer exact Total_DOS.
+        exact_columns = [
+            col for col, norm in normalized.items()
+            if norm == "totaldos"
+        ]
+
+        if exact_columns:
+            selected_columns = [exact_columns[0]]
+        else:
+            selected_columns = [
+                col for col, norm in normalized.items()
+                if "total" in norm and "dos" in norm
+            ]
+
+        if not selected_columns:
+            return None
+
+        # A total DOS should be one explicitly named column.
+        selected_columns = [selected_columns[0]]
+        parse_mode = "named_column_Total_DOS"
+
+    elif mode == "pdos":
+        # Prefer exact Li_PDOS.
+        exact_columns = [
+            col for col, norm in normalized.items()
+            if norm == "lipdos"
+        ]
+
+        if exact_columns:
+            selected_columns = [exact_columns[0]]
+            parse_mode = "named_column_Li_PDOS"
+
+        else:
+            # Support files with separate Li components, such as:
+            # Li_PDOS_x, Li_PDOS_y, Li_PDOS_z
+            # or Li1_PDOS, Li2_PDOS, etc.
+            selected_columns = [
+                col for col, norm in normalized.items()
+                if (
+                    norm.startswith("lipdos")
+                    or (
+                        "li" in norm
+                        and (
+                            "pdos" in norm
+                            or "projecteddos" in norm
+                        )
+                    )
+                )
+                and "total" not in norm
+            ]
+
+            if not selected_columns:
+                return None
+
+            parse_mode = "summed_named_Li_PDOS_columns"
+
+    else:
+        raise ValueError(f"Unknown spectrum mode: {mode}")
+
+    frequency = pd.to_numeric(
+        df[frequency_column],
+        errors="coerce"
+    ).to_numpy(float)
+
+    density_matrix = np.column_stack([
+        pd.to_numeric(df[col], errors="coerce").to_numpy(float)
+        for col in selected_columns
+    ])
+
+    # Sum only explicitly identified Li columns when there are multiple
+    # Li atoms or Cartesian components.
+    density = np.nansum(density_matrix, axis=1)
+
+    metadata_source = (
+        f"table_header;"
+        f"frequency_column={frequency_column};"
+        f"selected_density_columns={selected_columns}"
+    )
+
+    number_density_columns = len(original_columns) - 1
+
+    return (
+        frequency,
+        density,
+        number_density_columns,
+        parse_mode,
+        metadata_source,
+    )
+def preprocess_spectrum(path: Path, mode: str, collection_root: Path):
+    """
+    Read and preprocess one DOS or Li-PDOS spectrum.
+
+    Priority:
+      1. Use explicitly named columns such as Total_DOS and Li_PDOS.
+      2. Fall back to the original numeric Phonopy parser only when named
+         columns are not present.
+
+    Structures with negative frequencies are retained. Only points satisfying
+
+        0 < frequency <= 100 THz
+
+    are used to construct spectral features.
+    """
+
+    # First try explicit header-based parsing.
+    named_result = read_named_spectrum_table(path, mode)
+
+    if named_result is not None:
+        (
+            freq,
+            dens,
+            nden,
+            parse_mode,
+            metadata_source,
+        ) = named_result
+
+    else:
+        # Fall back to the original Phonopy-style numeric table parser.
+        arr = safe_numeric_table(path)
+
+        (
+            freq,
+            dens,
+            nden,
+            parse_mode,
+            metadata_source,
+        ) = select_density(
+            arr,
+            path,
+            mode,
+            collection_root
+        )
+
+    freq = np.asarray(freq, dtype=float)
+    dens = np.asarray(dens, dtype=float)
+
+    finite = np.isfinite(freq) & np.isfinite(dens)
+    freq = freq[finite]
+    dens = dens[finite]
+
+    if len(freq) < 2:
+        raise ValueError("Fewer than two finite frequency–density rows")
+
+    order = np.argsort(freq)
+    freq = freq[order]
+    dens = dens[order]
+
+    negative_intensity_points = int(np.sum(dens < 0))
+
+    # Clip only negative DOS intensity values caused by numerical noise.
+    dens = np.clip(dens, 0.0, None)
+
+    # Average duplicate frequency rows rather than double-counting them.
+    spectrum_df = pd.DataFrame({
+        "frequency": freq,
+        "density": dens,
+    })
+
+    spectrum_df = (
+        spectrum_df
+        .groupby("frequency", as_index=False)["density"]
+        .mean()
+    )
+
+    freq = spectrum_df["frequency"].to_numpy(float)
+    dens = spectrum_df["density"].to_numpy(float)
+
+    # Negative-frequency information is diagnostic only.
+    negative_mask = freq < 0
+
+    negative_area = (
+        float(np.trapezoid(
+            dens[negative_mask],
+            freq[negative_mask]
+        ))
+        if np.sum(negative_mask) >= 2
+        else 0.0
+    )
+
+    # This is the only frequency-selection rule.
+    # No structure is rejected merely because it contains negative modes.
+    positive_mask = (
+        (freq > FREQ_MIN_THz)
+        & (freq <= FREQ_MAX_THz)
+    )
+
+    x = freq[positive_mask]
+    y = dens[positive_mask]
+
+    if len(x) < 2:
+        raise ValueError(
+            f"Fewer than two points satisfy "
+            f"{FREQ_MIN_THz} < frequency <= {FREQ_MAX_THz} THz"
+        )
+
+    positive_area = float(np.trapezoid(y, x))
+
+    if not np.isfinite(positive_area) or positive_area <= 0:
+        raise ValueError(
+            "Non-positive integrated spectral weight over the selected "
+            "positive-frequency interval"
+        )
+
+    qc = {
+        "file": str(path),
+        "mode": mode,
+        "parse_mode": parse_mode,
+        "metadata_source": metadata_source,
+        "numeric_rows": int(len(freq)),
+        "density_columns_in_source": int(nden),
+        "min_frequency_raw_THz": float(np.min(freq)),
+        "max_frequency_raw_THz": float(np.max(freq)),
+        "negative_frequency_points": int(np.sum(freq < 0)),
+        "zero_frequency_points": int(np.sum(freq == 0)),
+        "used_positive_frequency_points": int(len(x)),
+        "negative_intensity_points_clipped": (
+            negative_intensity_points
+        ),
+        "negative_frequency_area_diagnostic": negative_area,
+        "positive_area_0_to_100_THz": positive_area,
+    }
+
+    return {
+        "frequency": x,
+        "density": y,
+        "qc": qc,
+    }
+
+def extract_obelix_id(path: Path, collection_root: Path, known_ids: set):
+    try:
+        rel_parts = path.relative_to(collection_root).parts
+    except Exception:
+        rel_parts = path.parts
+    # Prefer exact 3-character tokens, searching closest path components first.
+    for part in reversed(rel_parts):
+        stem = Path(part).stem.lower()
+        tokens = re.findall(r"(?<![a-z0-9])([a-z0-9]{3})(?![a-z0-9])", stem)
+        for token in tokens:
+            if token in known_ids:
+                return token
+        if stem in known_ids:
+            return stem
+    # Then accept IDs at the beginning/end of a longer filename component.
+    for part in reversed(rel_parts):
+        stem = Path(part).stem.lower()
+        for token in re.split(r"[^a-z0-9]+", stem):
+            if token in known_ids:
+                return token
+        for oid in known_ids:
+            if stem.startswith(oid + "_") or stem.startswith(oid + "-") or stem.endswith("_" + oid) or stem.endswith("-" + oid):
+                return oid
+    return None
+
+
+def spectrum_file_score(path: Path, mode: str):
+    name = path.name.lower()
+    full = str(path).lower()
+    score = 0
+    if mode == "dos":
+        if name == "total_dos.dat": score += 200
+        if "total_dos" in name or "total-dos" in name: score += 160
+        if "dos" in name: score += 50
+        if "project" in name or "pdos" in name: score -= 150
+    else:
+        if "li" in name and ("pdos" in name or "project" in name): score += 230
+        if name == "projected_dos.dat": score += 200
+        if "projected_dos" in name or "projected-dos" in name: score += 170
+        if "pdos" in name: score += 130
+        if "dos" in name: score += 30
+        if "total_dos" in name: score -= 200
+    if path.suffix.lower() == ".dat": score += 10
+    if any(x in full for x in ["figure", "plot", "image", "band", "dispersion"]): score -= 50
+    return score
+
+
+def index_spectrum_files(collection_root: Path, mode: str, known_ids: set):
+    allowed_ext = {".dat", ".txt", ".csv", ".tsv"}
+    candidates = defaultdict(list)
+    unmatched = []
+    for path in collection_root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in allowed_ext:
+            continue
+        score = spectrum_file_score(path, mode)
+        if score <= 0:
+            continue
+        oid = extract_obelix_id(path, collection_root, known_ids)
+        row = {"mode": mode, "file": str(path), "score": score, "matched_ID": oid or ""}
+        if oid is None:
+            unmatched.append(row)
+        else:
+            candidates[oid].append((score, -len(str(path)), path))
+    selected = {}
+    index_rows = []
+    for oid, items in candidates.items():
+        items.sort(reverse=True)
+        selected[oid] = items[0][2]
+        for rank, (score, _, path) in enumerate(items, start=1):
+            index_rows.append({
+                "ID": oid, "mode": mode, "selected": rank == 1,
+                "candidate_rank": rank, "score": score, "file": str(path)
+            })
+    return selected, pd.DataFrame(index_rows), pd.DataFrame(unmatched)
+
+
+def load_collection(collection_root: Path, split: str, mode: str, known_ids: set):
+    selected, index_df, unmatched_df = index_spectrum_files(collection_root, mode, known_ids)
+    spectra, qc_rows, errors = {}, [], []
+    print(f"{split.upper()} {mode.upper()}: {len(selected)} candidate structures indexed")
+    for oid, path in sorted(selected.items()):
+        try:
+            spec = preprocess_spectrum(path, mode, collection_root)
+            spectra[oid] = spec
+            qc_rows.append({"ID": oid, "split": split, **spec["qc"], "status": "ok", "error": ""})
+        except Exception as exc:
+            errors.append({"ID": oid, "split": split, "mode": mode, "file": str(path), "status": "failed", "error": str(exc)})
+    qc_df = pd.DataFrame(qc_rows + errors)
+    print(f"  parsed successfully: {len(spectra)}; failed: {len(errors)}")
+    return spectra, qc_df, index_df, unmatched_df
+
+
+def integrate_bins(x, y, edges):
+    cum = np.concatenate([[0.0], cumulative_trapezoid(y, x)])
+    cedge = np.interp(edges, x, cum, left=0.0, right=cum[-1])
+    areas = np.diff(cedge)
+    return np.clip(areas, 0.0, None)
+
+
+def weighted_quantile_from_spectrum(x, y, q):
+    cum = np.concatenate([[0.0], cumulative_trapezoid(y, x)])
+    if cum[-1] <= 0:
+        return np.nan
+    return float(np.interp(q * cum[-1], cum, x))
+
+
+def spectral_descriptors(spec, prefix, entropy_edges):
+    x, y = spec["frequency"], spec["density"]
+    area = float(np.trapezoid(y, x))
+    centroid = float(np.trapezoid(x * y, x) / area)
+    variance = float(np.trapezoid(((x - centroid) ** 2) * y, x) / area)
+    bins = integrate_bins(x, y, entropy_edges)
+    p = bins / bins.sum() if bins.sum() > 0 else np.zeros_like(bins)
+    nz = p[p > 0]
+    entropy = float(-np.sum(nz * np.log(nz)) / np.log(len(p))) if len(nz) and len(p) > 1 else np.nan
+    cum = np.concatenate([[0.0], cumulative_trapezoid(y, x)])
+    def frac_below(th):
+        return float(np.interp(th, x, cum, left=0.0, right=cum[-1]) / area)
+    q05 = weighted_quantile_from_spectrum(x, y, 0.05)
+    q50 = weighted_quantile_from_spectrum(x, y, 0.50)
+    q95 = weighted_quantile_from_spectrum(x, y, 0.95)
+    return {
+        f"{prefix}_positive_area": area,
+        f"{prefix}_centroid_THz": centroid,
+        f"{prefix}_std_THz": math.sqrt(max(variance, 0.0)),
+        f"{prefix}_median_THz": q50,
+        f"{prefix}_q05_THz": q05,
+        f"{prefix}_q95_THz": q95,
+        f"{prefix}_bandwidth90_THz": q95 - q05,
+        f"{prefix}_peak_THz": float(x[np.argmax(y)]),
+        f"{prefix}_spectral_entropy": entropy,
+        **{f"{prefix}_fraction_below_{th:g}THz": frac_below(th) for th in [2, 5, 10, 20]},
+    }
+
+
+def collection_to_features(spectra: dict, prefix: str, bin_width: float):
+    edges = np.arange(FREQ_MIN_THz, FREQ_MAX_THz + 0.5 * bin_width, bin_width)
+    if edges[-1] < FREQ_MAX_THz:
+        edges = np.append(edges, FREQ_MAX_THz)
+    rows_area, rows_shape = {}, {}
+    labels = [f"{prefix}_{edges[i]:06.2f}_{edges[i+1]:06.2f}THz" for i in range(len(edges) - 1)]
+    for oid, spec in spectra.items():
+        area = integrate_bins(spec["frequency"], spec["density"], edges)
+        rows_area[oid] = area
+        rows_shape[oid] = area / area.sum() if area.sum() > 0 else np.full_like(area, np.nan)
+    area_df = pd.DataFrame.from_dict(rows_area, orient="index", columns=labels)
+    shape_df = pd.DataFrame.from_dict(rows_shape, orient="index", columns=labels)
+    area_df.index.name = "ID"; shape_df.index.name = "ID"
+    return area_df.sort_index(), shape_df.sort_index(), edges
+
+
+def descriptors_table(spectra: dict, prefix: str):
+    entropy_edges = np.arange(FREQ_MIN_THz, FREQ_MAX_THz + PRIMARY_BIN_WIDTH_THz, PRIMARY_BIN_WIDTH_THz)
+    rows = {oid: spectral_descriptors(spec, prefix, entropy_edges) for oid, spec in spectra.items()}
+    df = pd.DataFrame.from_dict(rows, orient="index").sort_index()
+    df.index.name = "ID"
+    return df
+
+
+def corr_columns(X, y):
+    X = np.asarray(X, float); y = np.asarray(y, float)
+    Xc = X - np.mean(X, axis=0, keepdims=True)
+    yc = y - np.mean(y)
+    denom = np.sqrt(np.sum(Xc * Xc, axis=0) * np.sum(yc * yc))
+    return np.divide(np.sum(Xc * yc[:, None], axis=0), denom, out=np.zeros(X.shape[1]), where=denom > 0)
+
+
+def analytic_corr_p(r, n):
+    r = np.clip(np.asarray(r), -0.999999999, 0.999999999)
+    t = np.abs(r) * np.sqrt(max(n - 2, 1) / np.maximum(1.0 - r * r, 1e-15))
+    return 2.0 * stats.t.sf(t, df=max(n - 2, 1))
+
+
+def permutation_pvalues(X, y, observed, n_perm, seed, use_gpu=True):
+    """Featurewise and max-|stat| permutation p-values for correlations."""
+    rng = np.random.default_rng(seed)
+    X = np.asarray(X, np.float32)
+    y = np.asarray(y, np.float32)
+    n, p = X.shape
+    obs = np.abs(np.asarray(observed, float))
+    counts = np.zeros(p, dtype=np.int64)
+    maxstats = []
+
+    if use_gpu and GPU_AVAILABLE and torch is not None:
+        device = torch.device("cuda")
+        Xt = torch.as_tensor(X, device=device)
+        yt = torch.as_tensor(y, device=device)
+        Xz = (Xt - Xt.mean(0)) / torch.clamp(Xt.std(0, unbiased=True), min=1e-12)
+        Xz = torch.nan_to_num(Xz)
+        done = 0
+        gen = torch.Generator(device=device)
+        gen.manual_seed(seed)
+        while done < n_perm:
+            b = min(PERMUTATION_BATCH_SIZE, n_perm - done)
+            # Independent random permutations generated by sorting random keys.
+            perm_idx = torch.argsort(torch.rand((n, b), device=device, generator=gen), dim=0)
+            Yp = yt[perm_idx]
+            Yz = (Yp - Yp.mean(0)) / torch.clamp(Yp.std(0, unbiased=True), min=1e-12)
+            R = (Xz.T @ Yz) / max(n - 1, 1)  # p x b
+            A = torch.abs(R)
+            counts += torch.sum(A >= torch.as_tensor(obs[:, None], device=device), dim=1).cpu().numpy()
+            maxstats.extend(torch.max(A, dim=0).values.cpu().numpy().tolist())
+            done += b
+        del Xt, yt, Xz
+        torch.cuda.empty_cache()
+    else:
+        for _ in range(n_perm):
+            rp = np.abs(corr_columns(X, y[rng.permutation(n)]))
+            counts += rp >= obs
+            maxstats.append(float(np.max(rp)))
+
+    maxstats = np.asarray(maxstats)
+    p_feature = (counts + 1) / (n_perm + 1)
+    p_maxT = (np.sum(maxstats[:, None] >= obs[None, :], axis=0) + 1) / (n_perm + 1)
+    return p_feature, p_maxT
+
+
+def bootstrap_correlation_ci(X, y, spearman=False, n_boot=500, seed=42):
+    rng = np.random.default_rng(seed)
+    X0 = np.asarray(X, float)
+    y0 = np.asarray(y, float)
+    if spearman:
+        # Rank-score bootstrap: efficient and stable for the large bin scan.
+        X0 = np.apply_along_axis(rankdata, 0, X0)
+        y0 = rankdata(y0)
+    vals = np.empty((n_boot, X0.shape[1]), dtype=np.float32)
+    n = len(y0)
+    for b in range(n_boot):
+        idx = rng.integers(0, n, n)
+        vals[b] = corr_columns(X0[idx], y0[idx])
+    return np.nanpercentile(vals, 2.5, axis=0), np.nanpercentile(vals, 97.5, axis=0)
+
+
+def parse_bin_from_feature(name):
+    m = re.search(r"_(\d+\.\d+)_(\d+\.\d+)THz$", str(name))
+    if not m:
+        return np.nan, np.nan, np.nan
+    lo, hi = float(m.group(1)), float(m.group(2))
+    return lo, hi, 0.5 * (lo + hi)
+
+
+def make_cv_splits(n, groups=None, n_splits=5):
+    if groups is not None:
+        groups = np.asarray(groups)
+        nunique = len(np.unique(groups))
+        if nunique >= 3:
+            gkf = GroupKFold(n_splits=min(n_splits, nunique))
+            return list(gkf.split(np.arange(n), groups=groups))
+    kf = KFold(n_splits=min(n_splits, max(2, n // 10)), shuffle=True, random_state=RANDOM_SEED)
+    return list(kf.split(np.arange(n)))
+
+
+def spline_cv_gain(X, y, groups=None):
+    splits = make_cv_splits(len(y), groups=groups, n_splits=5)
+    gains, lin_r2s, spline_r2s = [], [], []
+    for j in range(X.shape[1]):
+        xj = X[:, [j]]
+        try:
+            pred_lin = cross_val_predict(LinearRegression(), xj, y, cv=splits, n_jobs=-1)
+            spline_model = make_pipeline(
+                SplineTransformer(n_knots=4, degree=3, include_bias=False),
+                StandardScaler(), Ridge(alpha=1.0)
+            )
+            pred_spl = cross_val_predict(spline_model, xj, y, cv=splits, n_jobs=-1)
+            lr2 = r2_score(y, pred_lin); sr2 = r2_score(y, pred_spl)
+        except Exception:
+            lr2 = np.nan; sr2 = np.nan
+        lin_r2s.append(lr2); spline_r2s.append(sr2); gains.append(sr2 - lr2)
+    return np.asarray(lin_r2s), np.asarray(spline_r2s), np.asarray(gains)
+
+
+def run_association(feature_df: pd.DataFrame, metadata_df: pd.DataFrame, target_col: str,
+                    representation: str, split: str, bin_width=None,
+                    transform="none", do_spline=False, do_nonlinear=True, seed=42):
+    ids = feature_df.index.intersection(metadata_df.index)
+    Xdf = feature_df.loc[ids].copy()
+    yser = metadata_df.loc[ids, target_col]
+    valid_rows = np.isfinite(yser.to_numpy(float)) & np.all(np.isfinite(Xdf.to_numpy(float)), axis=1)
+    Xdf = Xdf.loc[valid_rows]
+    yser = yser.loc[valid_rows]
+    ids = Xdf.index
+    if len(ids) < 12:
+        raise ValueError(f"Only {len(ids)} usable samples")
+
+    X = Xdf.to_numpy(float)
+    if transform == "log1p":
+        X = np.log1p(np.clip(X, 0, None))
+    variances = np.nanvar(X, axis=0)
+    keep = np.isfinite(variances) & (variances > 1e-18)
+    X = X[:, keep]
+    cols = Xdf.columns.to_numpy()[keep]
+    if X.shape[1] == 0:
+        raise ValueError("No non-constant features")
+    y = yser.to_numpy(float)
+
+    pearson = corr_columns(X, y)
+    Xrank = np.apply_along_axis(rankdata, 0, X)
+    yrank = rankdata(y)
+    spearman = corr_columns(Xrank, yrank)
+    pp = analytic_corr_p(pearson, len(y))
+    sp = analytic_corr_p(spearman, len(y))
+    _, pp_fdr, _, _ = multipletests(pp, alpha=FDR_ALPHA, method="fdr_bh")
+    _, sp_fdr, _, _ = multipletests(sp, alpha=FDR_ALPHA, method="fdr_bh")
+
+    pearson_perm, pearson_maxT = permutation_pvalues(X, y, pearson, N_PERMUTATIONS, seed, use_gpu=True)
+    spearman_perm, spearman_maxT = permutation_pvalues(Xrank, yrank, spearman, N_PERMUTATIONS, seed + 1, use_gpu=True)
+    p_lo, p_hi = bootstrap_correlation_ci(X, y, spearman=False, n_boot=N_BOOTSTRAP, seed=seed + 2)
+    s_lo, s_hi = bootstrap_correlation_ci(X, y, spearman=True, n_boot=N_BOOTSTRAP, seed=seed + 3)
+
+    # Nonlinear dependence scores are computed for the primary scientific
+    # representations. Sensitivity-width and raw-area scans retain the much
+    # faster Pearson/Spearman inference.
+    if do_nonlinear:
+        mi = mutual_info_regression(X, y, random_state=seed, n_neighbors=min(5, len(y) - 1))
+        mi_counts = np.zeros(X.shape[1], dtype=int)
+        mi_max = []
+        rng = np.random.default_rng(seed + 4)
+        for _ in range(N_MI_PERMUTATIONS):
+            mip = mutual_info_regression(X, y[rng.permutation(len(y))], random_state=int(rng.integers(1, 2**31 - 1)), n_neighbors=min(5, len(y) - 1))
+            mi_counts += mip >= mi
+            mi_max.append(np.max(mip))
+        mi_perm = (mi_counts + 1) / (N_MI_PERMUTATIONS + 1)
+        mi_max = np.asarray(mi_max)
+        mi_maxT = (np.sum(mi_max[:, None] >= mi[None, :], axis=0) + 1) / (N_MI_PERMUTATIONS + 1)
+        dcor_vals = np.array([float(dcor.distance_correlation(X[:, j], y)) for j in range(X.shape[1])])
+    else:
+        mi = mi_perm = mi_maxT = dcor_vals = np.full(X.shape[1], np.nan)
+
+    groups = metadata_df.loc[ids, "Reduced Composition"].fillna(metadata_df.loc[ids].index.to_series()).astype(str).to_numpy()
+    if do_spline:
+        lin_r2, spline_r2, spline_gain = spline_cv_gain(X, y, groups=groups)
+    else:
+        lin_r2 = spline_r2 = spline_gain = np.full(X.shape[1], np.nan)
+
+    rows = []
+    for j, col in enumerate(cols):
+        lo, hi, center = parse_bin_from_feature(col)
+        rows.append({
+            "split": split, "representation": representation,
+            "bin_width_THz": bin_width if bin_width is not None else np.nan,
+            "feature": col, "bin_low_THz": lo, "bin_high_THz": hi, "bin_center_THz": center,
+            "n": len(y), "transform": transform,
+            "pearson_r": pearson[j], "pearson_ci95_low": p_lo[j], "pearson_ci95_high": p_hi[j],
+            "pearson_p_analytic": pp[j], "pearson_p_fdr": pp_fdr[j],
+            "pearson_p_permutation": pearson_perm[j], "pearson_p_maxT": pearson_maxT[j],
+            "spearman_rho": spearman[j], "spearman_ci95_low": s_lo[j], "spearman_ci95_high": s_hi[j],
+            "spearman_p_analytic": sp[j], "spearman_p_fdr": sp_fdr[j],
+            "spearman_p_permutation": spearman_perm[j], "spearman_p_maxT": spearman_maxT[j],
+            "mutual_information": mi[j], "mi_p_permutation": mi_perm[j], "mi_p_maxT": mi_maxT[j],
+            "distance_correlation": dcor_vals[j],
+            "linear_cv_R2": lin_r2[j], "spline_cv_R2": spline_r2[j],
+            "nonlinear_spline_gain_R2": spline_gain[j],
+        })
+    return pd.DataFrame(rows), ids
+
+
+def composition_static_features(meta_all: pd.DataFrame):
+    compositions = {}
+    element_set = set()
+    for oid, formula in meta_all["Reduced Composition"].items():
+        try:
+            c = Composition(str(formula))
+            compositions[oid] = c
+            element_set.update(el.symbol for el in c.elements)
+        except Exception:
+            compositions[oid] = None
+    elements = sorted(element_set, key=lambda s: Element(s).Z)
+    rows = {}
+    for oid, row in meta_all.iterrows():
+        feats = {}
+        c = compositions.get(oid)
+        if c is not None:
+            total = float(c.num_atoms)
+            fracs = {el.symbol: float(c[el] / total) for el in c.elements}
+            for el in elements:
+                feats[f"frac_{el}"] = fracs.get(el, 0.0)
+            props = defaultdict(list)
+            weights = []
+            for el in c.elements:
+                e = Element(el.symbol)
+                w = fracs[el.symbol]
+                weights.append(w)
+                props["Z"].append(float(e.Z))
+                props["atomic_mass"].append(float(e.atomic_mass))
+                props["X"].append(float(e.X) if e.X is not None else np.nan)
+                props["row"].append(float(e.row) if e.row is not None else np.nan)
+                props["group"].append(float(e.group) if e.group is not None else np.nan)
+            weights = np.asarray(weights, float)
+            for pname, vals in props.items():
+                vals = np.asarray(vals, float)
+                ok = np.isfinite(vals)
+                if np.any(ok):
+                    ww = weights[ok] / weights[ok].sum()
+                    mean = np.sum(ww * vals[ok])
+                    feats[f"comp_{pname}_mean"] = mean
+                    feats[f"comp_{pname}_std"] = math.sqrt(max(np.sum(ww * (vals[ok] - mean) ** 2), 0))
+                    feats[f"comp_{pname}_min"] = np.min(vals[ok])
+                    feats[f"comp_{pname}_max"] = np.max(vals[ok])
+        for col in ["Z", "Space group #", "a", "b", "c", "alpha", "beta", "gamma"]:
+            feats[f"static_{col}"] = pd.to_numeric(row.get(col, np.nan), errors="coerce")
+        rows[oid] = feats
+    out = pd.DataFrame.from_dict(rows, orient="index").sort_index()
+    out = out.dropna(axis=1, how="all")
+    out.index.name = "ID"
+    return out
+
+
+def fit_crossfitted_residuals(X_train_df, X_test_df, train_meta, test_meta, static_df, target_col):
+    train_ids = X_train_df.index.intersection(train_meta.index).intersection(static_df.index)
+    test_ids = X_test_df.index.intersection(test_meta.index).intersection(static_df.index)
+    train_ids = train_ids[np.isfinite(train_meta.loc[train_ids, target_col].to_numpy(float))]
+    test_ids = test_ids[np.isfinite(test_meta.loc[test_ids, target_col].to_numpy(float))]
+    common_cols = X_train_df.columns.intersection(X_test_df.columns)
+    Xtr = X_train_df.loc[train_ids, common_cols].to_numpy(float)
+    Xte = X_test_df.loc[test_ids, common_cols].to_numpy(float)
+    Ztr = static_df.loc[train_ids].to_numpy(float)
+    Zte = static_df.loc[test_ids].to_numpy(float)
+    ytr = train_meta.loc[train_ids, target_col].to_numpy(float)
+    yte = test_meta.loc[test_ids, target_col].to_numpy(float)
+    groups = train_meta.loc[train_ids, "Reduced Composition"].fillna(pd.Series(train_ids, index=train_ids)).astype(str).to_numpy()
+    splits = make_cv_splits(len(train_ids), groups=groups, n_splits=5)
+
+    yhat = np.full(len(train_ids), np.nan)
+    Xhat = np.full_like(Xtr, np.nan)
+    for tr_idx, va_idx in splits:
+        y_model = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), Ridge(alpha=10.0))
+        x_model = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), Ridge(alpha=10.0))
+        y_model.fit(Ztr[tr_idx], ytr[tr_idx]); yhat[va_idx] = y_model.predict(Ztr[va_idx])
+        x_model.fit(Ztr[tr_idx], Xtr[tr_idx]); Xhat[va_idx] = x_model.predict(Ztr[va_idx])
+
+    y_model = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), Ridge(alpha=10.0))
+    x_model = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), Ridge(alpha=10.0))
+    y_model.fit(Ztr, ytr); x_model.fit(Ztr, Xtr)
+    yres_tr = ytr - yhat; Xres_tr = Xtr - Xhat
+    yres_te = yte - y_model.predict(Zte); Xres_te = Xte - x_model.predict(Zte)
+
+    train_res_df = pd.DataFrame(Xres_tr, index=train_ids, columns=common_cols)
+    test_res_df = pd.DataFrame(Xres_te, index=test_ids, columns=common_cols)
+    train_res_meta = train_meta.loc[train_ids].copy(); train_res_meta["residual_log10_ic"] = yres_tr
+    test_res_meta = test_meta.loc[test_ids].copy(); test_res_meta["residual_log10_ic"] = yres_te
+    return train_res_df, test_res_df, train_res_meta, test_res_meta
+
+
+def regression_metrics(y_true, y_pred):
+    return {
+        "MAE": mean_absolute_error(y_true, y_pred),
+        "RMSE": math.sqrt(mean_squared_error(y_true, y_pred)),
+        "R2": r2_score(y_true, y_pred),
+        "Spearman_rho": stats.spearmanr(y_true, y_pred).statistic,
+    }
+
+
+def evaluate_models(Xtr_df, Xte_df, train_meta, test_meta, target_col, cohort, feature_set, static_df=None):
+    common_cols = Xtr_df.columns.intersection(Xte_df.columns)
+    train_ids = Xtr_df.index.intersection(train_meta.index)
+    test_ids = Xte_df.index.intersection(test_meta.index)
+    train_ids = train_ids[np.isfinite(train_meta.loc[train_ids, target_col].to_numpy(float))]
+    test_ids = test_ids[np.isfinite(test_meta.loc[test_ids, target_col].to_numpy(float))]
+    Xtr = Xtr_df.loc[train_ids, common_cols].to_numpy(float)
+    Xte = Xte_df.loc[test_ids, common_cols].to_numpy(float)
+    ytr = train_meta.loc[train_ids, target_col].to_numpy(float)
+    yte = test_meta.loc[test_ids, target_col].to_numpy(float)
+    groups = train_meta.loc[train_ids, "Reduced Composition"].fillna(pd.Series(train_ids, index=train_ids)).astype(str).to_numpy()
+    cv = make_cv_splits(len(train_ids), groups=groups, n_splits=5)
+
+    results = []
+    ridge = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scale", StandardScaler()),
+        ("model", Ridge())
+    ])
+    search = GridSearchCV(ridge, {"model__alpha": np.logspace(-4, 4, 17)}, scoring="neg_mean_absolute_error", cv=cv, n_jobs=-1)
+    search.fit(Xtr, ytr)
+    pred = search.predict(Xte)
+    results.append({"cohort": cohort, "feature_set": feature_set, "model": "RidgeCV", "n_train": len(ytr), "n_test": len(yte), "best_params": json.dumps(search.best_params_), **regression_metrics(yte, pred)})
+
+    if RUN_XGBOOST:
+        try:
+            from xgboost import XGBRegressor
+            params = dict(
+                n_estimators=600, max_depth=3, learning_rate=0.03,
+                subsample=0.8, colsample_bytree=0.8,
+                reg_lambda=5.0, reg_alpha=0.1,
+                objective="reg:squarederror", random_state=RANDOM_SEED,
+                tree_method="hist", n_jobs=-1,
+            )
+            if GPU_AVAILABLE:
+                params["device"] = "cuda"
+            model = Pipeline([
+                ("imputer", SimpleImputer(strategy="median")),
+                ("model", XGBRegressor(**params))
+            ])
+            model.fit(Xtr, ytr)
+            pred = model.predict(Xte)
+            results.append({"cohort": cohort, "feature_set": feature_set, "model": "XGBoost_GPU" if GPU_AVAILABLE else "XGBoost_CPU", "n_train": len(ytr), "n_test": len(yte), "best_params": json.dumps(params, default=str), **regression_metrics(yte, pred)})
+        except Exception as exc:
+            results.append({"cohort": cohort, "feature_set": feature_set, "model": "XGBoost_FAILED", "n_train": len(ytr), "n_test": len(yte), "best_params": str(exc), "MAE": np.nan, "RMSE": np.nan, "R2": np.nan, "Spearman_rho": np.nan})
+    return results
+
+
+def save_mean_spectrum_quartiles(feature_df, meta, target_col, title, outfile):
+    ids = feature_df.index.intersection(meta.index)
+    y = meta.loc[ids, target_col]
+    valid = np.isfinite(y.to_numpy(float))
+    ids = ids[valid]; y = y.loc[ids]
+    if len(ids) < 20:
+        return
+    q = pd.qcut(y, 4, labels=["Q1: lowest σ", "Q2", "Q3", "Q4: highest σ"], duplicates="drop")
+    centers = np.array([parse_bin_from_feature(c)[2] for c in feature_df.columns])
+    plt.figure(figsize=(8.2, 5.2))
+    for label in q.cat.categories:
+        selected = q.index[q == label]
+        mean = feature_df.loc[selected].mean(axis=0).to_numpy(float)
+        sem = feature_df.loc[selected].sem(axis=0).to_numpy(float)
+        plt.plot(centers, mean, label=f"{label} (n={len(selected)})")
+        plt.fill_between(centers, mean - sem, mean + sem, alpha=0.15)
+    plt.xlabel("Frequency (THz)"); plt.ylabel("Normalized spectral weight per bin")
+    plt.title(title); plt.legend(frameon=False, fontsize=8); plt.tight_layout()
+    plt.savefig(outfile, dpi=300); plt.close()
+
+
+def save_association_curve(train_assoc, test_assoc, representation, outfile):
+    tr = train_assoc.sort_values("bin_center_THz")
+    te = test_assoc.sort_values("bin_center_THz")
+    plt.figure(figsize=(8.4, 5.2))
+    plt.axhline(0, linewidth=1)
+    plt.plot(tr["bin_center_THz"], tr["spearman_rho"], label="Train discovery")
+    plt.fill_between(tr["bin_center_THz"], tr["spearman_ci95_low"], tr["spearman_ci95_high"], alpha=0.18)
+    plt.plot(te["bin_center_THz"], te["spearman_rho"], linestyle="--", label="Test replication")
+    sig = tr["spearman_p_maxT"] < 0.05
+    if sig.any():
+        plt.scatter(tr.loc[sig, "bin_center_THz"], tr.loc[sig, "spearman_rho"], marker="o", s=22, label="Train maxT p<0.05")
+    plt.xlabel("Frequency-bin center (THz)"); plt.ylabel("Spearman ρ with log$_{10}$ conductivity")
+    plt.title(representation.replace("_", " ")); plt.legend(frameon=False); plt.tight_layout()
+    plt.savefig(outfile, dpi=300); plt.close()
+
+
+def save_replication_scatter(replication_df, outfile):
+    if replication_df.empty:
+        return
+    plt.figure(figsize=(6.2, 5.6))
+    for rep, grp in replication_df.groupby("representation"):
+        plt.scatter(grp["spearman_rho_train"], grp["spearman_rho_test"], s=22, alpha=0.75, label=rep)
+    lim = np.nanmax(np.abs(replication_df[["spearman_rho_train", "spearman_rho_test"]].to_numpy()))
+    lim = max(lim, 0.1)
+    plt.plot([-lim, lim], [-lim, lim], linestyle=":")
+    plt.axhline(0, linewidth=0.8); plt.axvline(0, linewidth=0.8)
+    plt.xlim(-lim * 1.05, lim * 1.05); plt.ylim(-lim * 1.05, lim * 1.05)
+    plt.xlabel("Train Spearman ρ"); plt.ylabel("Test Spearman ρ")
+    plt.title("Frequency-bin effect replication")
+    plt.legend(frameon=False, fontsize=8); plt.tight_layout(); plt.savefig(outfile, dpi=300); plt.close()
+
+
+def save_model_plot(model_df, outfile):
+    if model_df.empty:
+        return
+    d = model_df.dropna(subset=["MAE"]).copy()
+    if d.empty:
+        return
+    labels = d["cohort"] + "\n" + d["feature_set"] + "\n" + d["model"]
+    x = np.arange(len(d))
+    plt.figure(figsize=(max(9, 0.48 * len(d)), 5.7))
+    plt.bar(x, d["MAE"])
+    plt.xticks(x, labels, rotation=75, ha="right", fontsize=7)
+    plt.ylabel("Held-out test MAE in log$_{10}$(S cm$^{-1}$)")
+    plt.title("Predictive confirmation on the official OBELiX test split")
+    plt.tight_layout(); plt.savefig(outfile, dpi=300); plt.close()
+
+# ------------------------------ DOWNLOAD -------------------------------
+# ----------------------- VERIFY MOUNTED FOLDERS ------------------------
+print("\nVerifying mounted Drive folders...")
+
+for (split, mode), (_, root) in FOLDER_SPECS.items():
+    if not root.exists():
+        raise FileNotFoundError(
+            f"Mounted folder does not exist for {split}/{mode}: {root}"
+        )
+
+    file_count = sum(1 for p in root.rglob("*") if p.is_file())
+
+    if file_count == 0:
+        raise RuntimeError(
+            f"No files were found for {split}/{mode} in:\n{root}"
+        )
+
+    print(
+        f"  {split.upper():5s} {mode.upper():4s}: "
+        f"{file_count:,} files in {root}"
+    )
+
+print("Mounted folders verified. No Drive files will be downloaded or copied.")
+
+# Official OBELiX tables
+TRAIN_CSV = "https://raw.githubusercontent.com/NRC-Mila/OBELiX/main/data/downloads/train.csv"
+TEST_CSV  = "https://raw.githubusercontent.com/NRC-Mila/OBELiX/main/data/downloads/test.csv"
+train_meta = prepare_obelix(pd.read_csv(TRAIN_CSV, dtype={"ID": str}), "train").set_index("ID", drop=False)
+test_meta  = prepare_obelix(pd.read_csv(TEST_CSV, dtype={"ID": str}), "test").set_index("ID", drop=False)
+meta_all = pd.concat([train_meta, test_meta], axis=0)
+known_ids = set(meta_all.index)
+TARGET = target_column(PRIMARY_CENSOR_POLICY)
+print(f"OBELiX rows: train={len(train_meta)}, test={len(test_meta)}; primary target={TARGET}")
+
+# ---------------------------- PARSE SPECTRA ----------------------------
+collections = {}
+qc_frames, index_frames, unmatched_frames = [], [], []
+for (split, mode), (_, root) in FOLDER_SPECS.items():
+    spectra, qc, idx, unmatched = load_collection(root, split, mode, known_ids)
+    collections[(split, mode)] = spectra
+    qc_frames.append(qc)
+    if not idx.empty:
+        idx["split"] = split; index_frames.append(idx)
+    if not unmatched.empty:
+        unmatched["split"] = split; unmatched_frames.append(unmatched)
+
+qc_all = pd.concat(qc_frames, ignore_index=True) if qc_frames else pd.DataFrame()
+file_index = pd.concat(index_frames, ignore_index=True) if index_frames else pd.DataFrame()
+unmatched_files = pd.concat(unmatched_frames, ignore_index=True) if unmatched_frames else pd.DataFrame()
+qc_all.to_csv(TABLES / "spectrum_QC_all.csv", index=False)
+# ---------------- VERIFY THAT LI-PDOS WAS READ CORRECTLY ----------------
+pdos_qc = qc_all[
+    (qc_all["mode"] == "pdos")
+    & (qc_all["status"] == "ok")
+].copy()
+
+if pdos_qc.empty:
+    raise RuntimeError("No Li-PDOS spectra were parsed successfully.")
+
+unsafe_pdos = pdos_qc[
+    ~pdos_qc["parse_mode"].astype(str).isin([
+        "named_column_Li_PDOS",
+        "summed_named_Li_PDOS_columns",
+        "Li_columns_from_atom_resolved_PDOS",
+        "Li_columns_from_xyz_resolved_PDOS",
+        "single_Li_PDOS_column",
+    ])
+]
+
+print("\nLi-PDOS parser modes:")
+print(
+    pdos_qc["parse_mode"]
+    .value_counts(dropna=False)
+    .to_string()
+)
+
+if len(unsafe_pdos):
+    unsafe_pdos.to_csv(
+        TABLES / "UNSAFE_OR_UNVERIFIED_PDOS_FILES.csv",
+        index=False
+    )
+
+    raise RuntimeError(
+        f"{len(unsafe_pdos)} PDOS files were not parsed using verified "
+        "Li-specific columns. Inspect "
+        "tables/UNSAFE_OR_UNVERIFIED_PDOS_FILES.csv."
+    )
+
+print(
+    "\nAll successfully parsed PDOS spectra use explicitly identified "
+    "Li-specific columns."
+)
+file_index.to_csv(TABLES / "spectrum_file_candidates_and_selection.csv", index=False)
+unmatched_files.to_csv(TABLES / "unmatched_spectrum_files.csv", index=False)
+
+# Fallback warning is intentionally conspicuous.
+if not qc_all.empty and "parse_mode" in qc_all:
+    fallback = qc_all[qc_all["parse_mode"].astype(str).str.contains("FALLBACK", na=False)]
+    if len(fallback):
+        print("\nWARNING: metadata-free multi-column PDOS files were summed as Li-PDOS.")
+        print(f"Affected structures: {len(fallback)}. Inspect tables/spectrum_QC_all.csv before publication.")
+
+coverage_rows = []
+for split in ["train", "test"]:
+    dos_ids = set(collections[(split, "dos")])
+    pdos_ids = set(collections[(split, "pdos")])
+    target_ids = set((train_meta if split == "train" else test_meta).dropna(subset=[TARGET]).index)
+    coverage_rows.append({
+        "split": split, "OBELiX_rows": len(train_meta if split == "train" else test_meta),
+        "valid_target_rows": len(target_ids), "parsed_DOS": len(dos_ids), "parsed_Li_PDOS": len(pdos_ids),
+        "paired_DOS_and_PDOS": len(dos_ids & pdos_ids),
+        "DOS_with_target": len(dos_ids & target_ids), "PDOS_with_target": len(pdos_ids & target_ids),
+        "paired_with_target": len(dos_ids & pdos_ids & target_ids),
+    })
+coverage_df = pd.DataFrame(coverage_rows)
+coverage_df.to_csv(TABLES / "dataset_coverage.csv", index=False)
+print("\nCoverage:\n", coverage_df.to_string(index=False))
+
+# ------------------------- FEATURES AND DESCRIPTORS --------------------
+feature_store = defaultdict(dict)   # (split, width) -> named DataFrames
+edges_store = {}
+for split in ["train", "test"]:
+    for width in BIN_WIDTHS_THz:
+        dos_area, dos_shape, edges = collection_to_features(collections[(split, "dos")], "totalDOS", width)
+        li_area, li_shape, _ = collection_to_features(collections[(split, "pdos")], "LiPDOS", width)
+        feature_store[(split, width)]["total_area"] = dos_area
+        feature_store[(split, width)]["total_shape"] = dos_shape
+        feature_store[(split, width)]["li_area"] = li_area
+        feature_store[(split, width)]["li_shape"] = li_shape
+        edges_store[width] = edges
+
+        # Paired Li participation and host-DOS features are created only when
+        # the PDOS and total DOS normalizations appear compatible.
+        paired_ids = dos_area.index.intersection(li_area.index)
+        if len(paired_ids):
+            totalA = dos_area.loc[paired_ids].to_numpy(float)
+            liA = li_area.loc[paired_ids].to_numpy(float)
+            ratio = liA.sum(1) / np.maximum(totalA.sum(1), 1e-15)
+            compatible = np.isfinite(ratio) & (ratio >= 0) & (ratio <= 1.25)
+            compatibility_rate = float(np.mean(compatible))
+            comp_rows = pd.DataFrame({"ID": paired_ids, "split": split, "bin_width_THz": width, "Li_area_over_total_area": ratio, "normalization_compatible": compatible})
+            comp_rows.to_csv(TABLES / f"{split}_PDOS_DOS_normalization_check_{width:g}THz.csv", index=False)
+            if compatibility_rate >= 0.80 and np.sum(compatible) >= 12:
+                ids_ok = paired_ids[compatible]
+                total_ok = dos_area.loc[ids_ok].copy()
+                li_ok = li_area.loc[ids_ok].copy()
+                # Rename columns to a common grid before arithmetic.
+                common_names = [f"paired_{edges[i]:06.2f}_{edges[i+1]:06.2f}THz" for i in range(len(edges)-1)]
+                total_ok.columns = common_names; li_ok.columns = common_names
+                host = (total_ok - li_ok).clip(lower=0)
+                host_shape = host.div(host.sum(axis=1).replace(0, np.nan), axis=0)
+                participation = li_ok / (total_ok + 1e-15)
+                feature_store[(split, width)]["host_shape"] = host_shape
+                feature_store[(split, width)]["li_participation"] = participation
+
+        for name, df in feature_store[(split, width)].items():
+            df.reset_index().to_csv(FEATURES_DIR / f"{split}_{name}_{width:g}THz.csv", index=False)
+
+# Compact interpretable descriptors
+desc_train = pd.concat([
+    descriptors_table(collections[("train", "dos")], "totalDOS"),
+    descriptors_table(collections[("train", "pdos")], "LiPDOS")
+], axis=1)
+desc_test = pd.concat([
+    descriptors_table(collections[("test", "dos")], "totalDOS"),
+    descriptors_table(collections[("test", "pdos")], "LiPDOS")
+], axis=1)
+desc_train.reset_index().to_csv(FEATURES_DIR / "train_compact_spectral_descriptors.csv", index=False)
+desc_test.reset_index().to_csv(FEATURES_DIR / "test_compact_spectral_descriptors.csv", index=False)
+
+# ------------------------- ASSOCIATION ANALYSIS ------------------------
+association_frames = []
+for width in BIN_WIDTHS_THz:
+    for representation in ["total_shape", "li_shape", "total_area", "li_area", "host_shape", "li_participation"]:
+        for split, meta in [("train", train_meta), ("test", test_meta)]:
+            df = feature_store[(split, width)].get(representation)
+            if df is None or df.empty:
+                continue
+            transform = "log1p" if representation.endswith("_area") else "none"
+            do_spline = bool(
+                RUN_SPLINE_NONLINEARITY and split == "train"
+                and abs(width - PRIMARY_BIN_WIDTH_THz) < 1e-9
+                and representation in {"total_shape", "li_shape"}
+            )
+            do_nonlinear = bool(
+                abs(width - PRIMARY_BIN_WIDTH_THz) < 1e-9
+                and representation in {"total_shape", "li_shape", "host_shape", "li_participation"}
+            )
+            try:
+                assoc, used_ids = run_association(
+                    df, meta, TARGET, representation, split,
+                    bin_width=width, transform=transform, do_spline=do_spline,
+                    do_nonlinear=do_nonlinear,
+                    seed=RANDOM_SEED + int(round(width * 100)) + (0 if split == "train" else 10000)
+                )
+                association_frames.append(assoc)
+                assoc.to_csv(ASSOC_DIR / f"{split}_{representation}_{width:g}THz_associations.csv", index=False)
+                print(f"Association completed: {split} / {representation} / {width:g} THz / n={len(used_ids)}")
+            except Exception as exc:
+                print(f"WARNING association skipped: {split} / {representation} / {width:g} THz: {exc}")
+
+# Descriptor associations
+for split, df, meta in [("train", desc_train, train_meta), ("test", desc_test, test_meta)]:
+    try:
+        assoc, _ = run_association(df, meta, TARGET, "compact_descriptors", split, bin_width=None, transform="none", do_spline=(RUN_SPLINE_NONLINEARITY and split == "train"), do_nonlinear=True, seed=RANDOM_SEED + (20000 if split == "test" else 15000))
+        association_frames.append(assoc)
+        assoc.to_csv(ASSOC_DIR / f"{split}_compact_descriptor_associations.csv", index=False)
+    except Exception as exc:
+        print(f"WARNING descriptor association skipped for {split}: {exc}")
+
+all_assoc = pd.concat(association_frames, ignore_index=True) if association_frames else pd.DataFrame()
+all_assoc.to_csv(TABLES / "all_association_results.csv", index=False)
+
+# Train-to-test replication table for exactly matching features.
+replication_rows = []
+if not all_assoc.empty:
+    for (rep, width), grp in all_assoc.groupby(["representation", "bin_width_THz"], dropna=False):
+        tr = grp[grp["split"] == "train"]
+        te = grp[grp["split"] == "test"]
+        if tr.empty or te.empty:
+            continue
+        merged = tr.merge(te, on="feature", suffixes=("_train", "_test"))
+        for _, r in merged.iterrows():
+            replication_rows.append({
+                "representation": rep, "bin_width_THz": width, "feature": r["feature"],
+                "bin_center_THz": r.get("bin_center_THz_train", np.nan),
+                "spearman_rho_train": r["spearman_rho_train"], "spearman_rho_test": r["spearman_rho_test"],
+                "pearson_r_train": r["pearson_r_train"], "pearson_r_test": r["pearson_r_test"],
+                "same_sign_spearman": np.sign(r["spearman_rho_train"]) == np.sign(r["spearman_rho_test"]),
+                "train_spearman_p_maxT": r["spearman_p_maxT_train"], "test_spearman_p_analytic": r["spearman_p_analytic_test"],
+            })
+replication_df = pd.DataFrame(replication_rows)
+replication_df.to_csv(TABLES / "train_test_effect_replication.csv", index=False)
+
+# ---------------- CENSORING SENSITIVITY (FAST SPEARMAN SCAN) -----------
+def censor_sensitivity_scan(df, meta, representation, split):
+    out = []
+    for policy in ["limit", "half_limit", "exclude"]:
+        tcol = target_column(policy)
+        ids = df.index.intersection(meta.index)
+        y = meta.loc[ids, tcol]
+        good = np.isfinite(y.to_numpy(float)) & np.all(np.isfinite(df.loc[ids].to_numpy(float)), axis=1)
+        X = df.loc[ids[good]].to_numpy(float); yy = y.loc[ids[good]].to_numpy(float)
+        keep = np.nanvar(X, axis=0) > 1e-18
+        X = X[:, keep]; cols = df.columns.to_numpy()[keep]
+        if len(yy) < 12 or X.shape[1] == 0:
+            continue
+        rho = corr_columns(np.apply_along_axis(rankdata, 0, X), rankdata(yy))
+        for c, r in zip(cols, rho):
+            lo, hi, center = parse_bin_from_feature(c)
+            out.append({"split": split, "representation": representation, "censor_policy": policy, "feature": c, "bin_center_THz": center, "n": len(yy), "spearman_rho": r})
+    return out
+
+censor_rows = []
+for split, meta in [("train", train_meta), ("test", test_meta)]:
+    for rep in ["total_shape", "li_shape"]:
+        df = feature_store[(split, PRIMARY_BIN_WIDTH_THz)].get(rep)
+        if df is not None:
+            censor_rows.extend(censor_sensitivity_scan(df, meta, rep, split))
+pd.DataFrame(censor_rows).to_csv(TABLES / "censoring_policy_sensitivity.csv", index=False)
+
+# ---------------------- CONDITIONAL ASSOCIATIONS -----------------------
+static_features = composition_static_features(meta_all)
+static_features.reset_index().to_csv(FEATURES_DIR / "composition_and_static_confounders.csv", index=False)
+conditional_frames = []
+if RUN_CONDITIONAL_ASSOCIATIONS:
+    for rep in ["total_shape", "li_shape"]:
+        Xtr = feature_store[("train", PRIMARY_BIN_WIDTH_THz)].get(rep)
+        Xte = feature_store[("test", PRIMARY_BIN_WIDTH_THz)].get(rep)
+        if Xtr is None or Xte is None:
+            continue
+        try:
+            tr_res, te_res, tr_meta_res, te_meta_res = fit_crossfitted_residuals(Xtr, Xte, train_meta, test_meta, static_features, TARGET)
+            for split, Xres, Mres in [("train", tr_res, tr_meta_res), ("test", te_res, te_meta_res)]:
+                assoc, _ = run_association(
+                    Xres, Mres, "residual_log10_ic", f"conditional_{rep}", split,
+                    bin_width=PRIMARY_BIN_WIDTH_THz, transform="none",
+                    do_spline=(RUN_SPLINE_NONLINEARITY and split == "train"),
+                    do_nonlinear=True,
+                    seed=RANDOM_SEED + (31000 if split == "train" else 32000)
+                )
+                conditional_frames.append(assoc)
+                assoc.to_csv(ASSOC_DIR / f"{split}_conditional_{rep}_associations.csv", index=False)
+        except Exception as exc:
+            print(f"WARNING conditional association skipped for {rep}: {exc}")
+conditional_assoc = pd.concat(conditional_frames, ignore_index=True) if conditional_frames else pd.DataFrame()
+conditional_assoc.to_csv(TABLES / "conditional_residual_associations.csv", index=False)
+
+# --------------------------- PREDICTIVE CHECK --------------------------
+model_rows = []
+if RUN_PREDICTIVE_MODELS:
+    # Cohort-specific comparisons ensure every static-vs-spectral comparison
+    # uses exactly the same materials.
+    cases = []
+    for cohort, rep_names in [("DOS cohort", ["total_shape"]), ("Li-PDOS cohort", ["li_shape"]), ("paired cohort", ["total_shape", "li_shape"])]:
+        tr_dfs = [feature_store[("train", PRIMARY_BIN_WIDTH_THz)].get(r) for r in rep_names]
+        te_dfs = [feature_store[("test", PRIMARY_BIN_WIDTH_THz)].get(r) for r in rep_names]
+        if any(x is None for x in tr_dfs + te_dfs):
+            continue
+        tr_ids = tr_dfs[0].index
+        te_ids = te_dfs[0].index
+        for d in tr_dfs[1:]: tr_ids = tr_ids.intersection(d.index)
+        for d in te_dfs[1:]: te_ids = te_ids.intersection(d.index)
+        spec_tr = pd.concat([d.loc[tr_ids] for d in tr_dfs], axis=1)
+        spec_te = pd.concat([d.loc[te_ids] for d in te_dfs], axis=1)
+        stat_tr = static_features.loc[tr_ids]
+        stat_te = static_features.loc[te_ids]
+        combo_tr = pd.concat([stat_tr, spec_tr], axis=1)
+        combo_te = pd.concat([stat_te, spec_te], axis=1)
+        cases.extend([
+            (cohort, "static only", stat_tr, stat_te),
+            (cohort, "+".join(rep_names), spec_tr, spec_te),
+            (cohort, "static + " + "+".join(rep_names), combo_tr, combo_te),
+        ])
+    for cohort, fset, Xtr, Xte in cases:
+        try:
+            model_rows.extend(evaluate_models(Xtr, Xte, train_meta, test_meta, TARGET, cohort, fset))
+            print(f"Models completed: {cohort} / {fset}")
+        except Exception as exc:
+            print(f"WARNING models skipped: {cohort} / {fset}: {exc}")
+model_df = pd.DataFrame(model_rows)
+model_df.to_csv(TABLES / "heldout_predictive_model_performance.csv", index=False)
+
+# ------------------------------- FIGURES -------------------------------
+# Dataset coverage
+plt.figure(figsize=(7.2, 4.8))
+x = np.arange(len(coverage_df)); w = 0.25
+plt.bar(x - w, coverage_df["DOS_with_target"], width=w, label="Total DOS")
+plt.bar(x, coverage_df["PDOS_with_target"], width=w, label="Li-PDOS")
+plt.bar(x + w, coverage_df["paired_with_target"], width=w, label="Paired")
+plt.xticks(x, coverage_df["split"].str.capitalize()); plt.ylabel("Materials with conductivity target")
+plt.title("Spectral dataset coverage"); plt.legend(frameon=False); plt.tight_layout()
+plt.savefig(FIGURES / "01_dataset_coverage.png", dpi=300); plt.close()
+
+save_mean_spectrum_quartiles(feature_store[("train", PRIMARY_BIN_WIDTH_THz)]["total_shape"], train_meta, TARGET,
+                              "Train total DOS by conductivity quartile", FIGURES / "02_total_DOS_by_conductivity_quartile.png")
+save_mean_spectrum_quartiles(feature_store[("train", PRIMARY_BIN_WIDTH_THz)]["li_shape"], train_meta, TARGET,
+                              "Train Li-projected DOS by conductivity quartile", FIGURES / "03_Li_PDOS_by_conductivity_quartile.png")
+
+if not all_assoc.empty:
+    for rep, num in [("total_shape", "04"), ("li_shape", "05")]:
+        tr = all_assoc[(all_assoc["split"] == "train") & (all_assoc["representation"] == rep) & (all_assoc["bin_width_THz"] == PRIMARY_BIN_WIDTH_THz)]
+        te = all_assoc[(all_assoc["split"] == "test") & (all_assoc["representation"] == rep) & (all_assoc["bin_width_THz"] == PRIMARY_BIN_WIDTH_THz)]
+        if not tr.empty and not te.empty:
+            save_association_curve(tr, te, rep, FIGURES / f"{num}_{rep}_frequency_associations.png")
+
+rep_primary = replication_df[replication_df["bin_width_THz"] == PRIMARY_BIN_WIDTH_THz] if not replication_df.empty else pd.DataFrame()
+save_replication_scatter(rep_primary, FIGURES / "06_train_test_effect_replication.png")
+save_model_plot(model_df, FIGURES / "07_predictive_model_MAE.png")
+
+# Top compact descriptors
+if not all_assoc.empty:
+    d = all_assoc[(all_assoc["split"] == "train") & (all_assoc["representation"] == "compact_descriptors")].copy()
+    if not d.empty:
+        d = d.reindex(d["spearman_rho"].abs().sort_values(ascending=False).index).head(15).sort_values("spearman_rho")
+        plt.figure(figsize=(8.2, 6.2)); plt.barh(d["feature"], d["spearman_rho"])
+        plt.xlabel("Train Spearman ρ with log$_{10}$ conductivity"); plt.title("Top compact spectral descriptors")
+        plt.tight_layout(); plt.savefig(FIGURES / "08_top_compact_descriptor_associations.png", dpi=300); plt.close()
+
+# ----------------------------- TEXT SUMMARY ----------------------------
+summary_lines = []
+summary_lines.append("OBELiX DOS / Li-PDOS ASSOCIATION WORKFLOW")
+summary_lines.append("=" * 52)
+summary_lines.append(f"Device: {DEVICE_NAME}")
+summary_lines.append(f"Frequency inclusion: 0 < frequency <= {FREQ_MAX_THz} THz")
+summary_lines.append("Negative-frequency structures were NOT removed; only non-positive frequency points were excluded from features.")
+summary_lines.append(f"Primary bin width: {PRIMARY_BIN_WIDTH_THz} THz; sensitivity widths: {BIN_WIDTHS_THz}")
+summary_lines.append(f"Primary target: {TARGET}")
+summary_lines.append("")
+summary_lines.append("Coverage:")
+summary_lines.append(coverage_df.to_string(index=False))
+
+if not all_assoc.empty:
+    for rep in ["total_shape", "li_shape", "compact_descriptors"]:
+        d = all_assoc[(all_assoc["split"] == "train") & (all_assoc["representation"] == rep)]
+        if rep != "compact_descriptors":
+            d = d[d["bin_width_THz"] == PRIMARY_BIN_WIDTH_THz]
+        if not d.empty:
+            top = d.reindex(d["spearman_rho"].abs().sort_values(ascending=False).index).head(10)
+            summary_lines.append(f"\nTop train effects: {rep}")
+            summary_lines.append(top[["feature", "n", "spearman_rho", "spearman_ci95_low", "spearman_ci95_high", "spearman_p_fdr", "spearman_p_maxT", "distance_correlation", "mutual_information", "nonlinear_spline_gain_R2"]].to_string(index=False))
+
+if not model_df.empty:
+    summary_lines.append("\nHeld-out model performance:")
+    summary_lines.append(model_df[["cohort", "feature_set", "model", "n_train", "n_test", "MAE", "RMSE", "R2", "Spearman_rho"]].to_string(index=False))
+
+summary_text = "\n".join(summary_lines)
+(RESULTS / "SUMMARY.txt").write_text(summary_text)
+print("\n" + summary_text)
+
+config = {
+    "mounted_drive_folders": {
+    f"{s}_{m}": str(root)
+    for (s, m), (_, root) in FOLDER_SPECS.items()
+},
+    "frequency_range_THz": [FREQ_MIN_THz, FREQ_MAX_THz],
+    "frequency_scale_to_THz": FREQUENCY_SCALE_TO_THz,
+    "bin_widths_THz": BIN_WIDTHS_THz,
+    "primary_bin_width_THz": PRIMARY_BIN_WIDTH_THz,
+    "primary_censor_policy": PRIMARY_CENSOR_POLICY,
+    "n_bootstrap": N_BOOTSTRAP,
+    "n_permutations": N_PERMUTATIONS,
+    "n_mi_permutations": N_MI_PERMUTATIONS,
+    "random_seed": RANDOM_SEED,
+    "device": DEVICE_NAME,
+    "pdos_multicolumn_fallback": PDOS_MULTICOLUMN_FALLBACK,
+}
+(RESULTS / "run_config.json").write_text(json.dumps(config, indent=2))
+
+# ------------------------------- ARCHIVE -------------------------------
+zip_path = Path("/content/OBELiX_DOS_PDOS_association_outputs.zip")
+if zip_path.exists(): zip_path.unlink()
+shutil.make_archive(str(zip_path.with_suffix("")), "zip", root_dir=RESULTS)
+print(f"\nFinished. Output archive: {zip_path}")
+
+if AUTO_DOWNLOAD_ZIP:
+    try:
+        from google.colab import files
+        files.download(str(zip_path))
+    except Exception as exc:
+        print(f"Automatic browser download was not started: {exc}")
+
+
+# ================================================================
+# OBELiX DOS / Li-PDOS publication-level kernel workflow
+# Single-cell Google Colab script; GPU-accelerated with PyTorch
+#
+# INPUT: the ZIP produced by the preceding DOS/PDOS association cell:
+#        OBELiX_DOS_PDOS_association_outputs.zip
+#
+# PRIMARY COHORT: structures having matched total DOS, Li-PDOS, static
+# descriptors, and ionic conductivity in the official OBELiX split.
+# All model comparisons therefore use identical samples.
+# ================================================================
+
+# ------------------------- USER CONFIGURATION -------------------------
+INPUT_ZIP = "/content/OBELiX_DOS_PDOS_association_outputs.zip"
+INPUT_RESULTS_DIR = "/content/obelix_dos_pdos_association/results"
+WORKDIR = "/content/obelix_kernel_publication"
+AUTO_UPLOAD_IF_MISSING = False
+AUTO_DOWNLOAD_ZIP = False
+
+PRIMARY_BIN_WIDTH_THz = 1.0
+FREQ_MIN_THz = 0.0
+FREQ_MAX_THz = 100.0
+PRIMARY_CENSOR_POLICY = "limit"     # limit, half_limit, exclude
+RANDOM_SEED = 20260718
+
+# Publication defaults. Reduce only for debugging.
+OUTER_FOLDS = 5
+INNER_FOLDS = 4
+ALPHA_LOG10_MIN = -5
+ALPHA_LOG10_MAX = 3
+N_ALPHA_VALUES = 7
+SINGLE_KERNEL_SCALE_GRID = (0.25, 0.5, 1.0, 2.0, 4.0)
+ADDITIVE_KERNEL_SCALE_GRID = (0.5, 1.0, 2.0)
+N_TWO_KERNEL_WEIGHTS = 6
+THREE_KERNEL_WEIGHT_STEP = 0.25
+WASSERSTEIN_QUANTILES = 256
+CLR_PSEUDOCOUNT = 1e-8
+
+N_BOOTSTRAP = 5000
+N_HSIC_PERMUTATIONS = 5000
+HSIC_BATCH_SIZE = 64
+MIN_FAMILY_SIZE_LOFO = 8
+RUN_LOFO = True
+RUN_CENSOR_SENSITIVITY = True
+SAVE_KERNEL_MATRICES = True
+
+# Models to run. Additive kernels use a common relative bandwidth multiplier
+# for their component kernels, while component weights are selected by CV.
+MODEL_SPECS = {
+    "static_rbf": {
+        "label": "Static RBF",
+        "components": ("static_rbf",),
+        "additive": False,
+    },
+    "li_linear": {
+        "label": "Li-PDOS linear",
+        "components": ("li_linear",),
+        "additive": False,
+    },
+    "li_rbf": {
+        "label": "Li-PDOS RBF",
+        "components": ("li_rbf",),
+        "additive": False,
+    },
+    "li_clr_rbf": {
+        "label": "Li-PDOS CLR–RBF",
+        "components": ("li_clr_rbf",),
+        "additive": False,
+    },
+    "li_cdf_rbf": {
+        "label": "Li-PDOS CDF–RBF",
+        "components": ("li_cdf_rbf",),
+        "additive": False,
+    },
+    "li_wasserstein": {
+        "label": "Li-PDOS Wasserstein",
+        "components": ("li_wasserstein",),
+        "additive": False,
+    },
+    "total_rbf": {
+        "label": "Total-DOS RBF",
+        "components": ("total_rbf",),
+        "additive": False,
+    },
+    "total_cdf_rbf": {
+        "label": "Total-DOS CDF–RBF",
+        "components": ("total_cdf_rbf",),
+        "additive": False,
+    },
+    "total_wasserstein": {
+        "label": "Total-DOS Wasserstein",
+        "components": ("total_wasserstein",),
+        "additive": False,
+    },
+    "static_plus_li_wasserstein": {
+        "label": "Static + Li Wasserstein",
+        "components": ("static_rbf", "li_wasserstein"),
+        "additive": True,
+    },
+    "static_plus_total_wasserstein": {
+        "label": "Static + total Wasserstein",
+        "components": ("static_rbf", "total_wasserstein"),
+        "additive": True,
+    },
+    "static_plus_li_plus_total": {
+        "label": "Static + Li + total Wasserstein",
+        "components": ("static_rbf", "li_wasserstein", "total_wasserstein"),
+        "additive": True,
+    },
+}
+
+# ------------------------- INSTALL / IMPORTS --------------------------
+import sys, subprocess, os, re, json, math, shutil, zipfile, warnings, itertools, time, ast, zlib
+from pathlib import Path
+from dataclasses import dataclass
+from collections import defaultdict
+
+import importlib.util
+package_checks = {
+    "numpy": "numpy",
+    "pandas": "pandas",
+    "scipy": "scipy",
+    "sklearn": "scikit-learn",
+    "matplotlib": "matplotlib",
+}
+missing_packages = [pkg for module, pkg in package_checks.items() if importlib.util.find_spec(module) is None]
+if missing_packages:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *missing_packages])
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from matplotlib.figure import Figure as _OBELIX_Figure
+from matplotlib.axes import Axes as _OBELIX_Axes
+if not hasattr(_OBELIX_Figure, "_obelix_original_savefig"):
+    _OBELIX_Figure._obelix_original_savefig = _OBELIX_Figure.savefig
+if not hasattr(plt, "_obelix_original_savefig"):
+    plt._obelix_original_savefig = plt.savefig
+_OBELIX_Figure.savefig = lambda self, *args, **kwargs: None
+plt.savefig = lambda *args, **kwargs: None
+plt.title = lambda *args, **kwargs: None
+_OBELIX_Axes.set_title = lambda self, *args, **kwargs: None
+plt.rcParams.update({
+    "font.size": 12, "axes.labelsize": 14, "xtick.labelsize": 11.5,
+    "ytick.labelsize": 11.5, "legend.fontsize": 10.5,
+    "pdf.fonttype": 42, "ps.fonttype": 42,
+})
+
+from scipy import stats
+from sklearn.model_selection import GroupKFold, KFold
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+
+# Re-create grids after numpy import.
+ALPHA_GRID = np.logspace(ALPHA_LOG10_MIN, ALPHA_LOG10_MAX, N_ALPHA_VALUES)
+TWO_KERNEL_WEIGHT_GRID = tuple(np.linspace(0.0, 1.0, N_TWO_KERNEL_WEIGHTS))
+
+try:
+    import torch
+except Exception as exc:
+    raise RuntimeError("PyTorch is required in Colab for this GPU workflow.") from exc
+
+GPU_AVAILABLE = bool(torch.cuda.is_available())
+DEVICE = torch.device("cuda" if GPU_AVAILABLE else "cpu")
+DEVICE_NAME = torch.cuda.get_device_name(0) if GPU_AVAILABLE else "CPU fallback"
+DTYPE = torch.float64
+
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+np.random.seed(RANDOM_SEED)
+torch.manual_seed(RANDOM_SEED)
+if GPU_AVAILABLE:
+    torch.cuda.manual_seed_all(RANDOM_SEED)
+
+print(f"Compute device: {DEVICE_NAME}")
+if not GPU_AVAILABLE:
+    print("WARNING: CUDA was not detected. Select a GPU runtime for the intended workflow.")
+else:
+    print("CUDA will be used for pairwise distances, eigensolves, KRR prediction, and HSIC permutations.")
+if not GPU_AVAILABLE:
+    torch.set_num_threads(min(8, os.cpu_count() or 1))
+
+# ----------------------------- DIRECTORIES ----------------------------
+ROOT = Path(WORKDIR)
+INPUT_ROOT = ROOT / "input_results"
+RESULTS = ROOT / "results"
+TABLES = RESULTS / "tables"
+FIGURES = RESULTS / "figures"
+KERNELS_DIR = RESULTS / "kernels"
+PRED_DIR = RESULTS / "predictions"
+for p in [ROOT, INPUT_ROOT, RESULTS, TABLES, FIGURES, KERNELS_DIR, PRED_DIR]:
+    p.mkdir(parents=True, exist_ok=True)
+
+# -------------------------- INPUT ZIP HANDLING -------------------------
+def locate_or_upload_input_zip():
+    candidate = Path(INPUT_ZIP)
+    if candidate.exists():
+        return candidate
+    alternatives = sorted(Path("/content").glob("*DOS*PDOS*association*outputs*.zip"))
+    if alternatives:
+        return alternatives[0]
+    if not AUTO_UPLOAD_IF_MISSING:
+        raise FileNotFoundError(f"Input ZIP not found: {candidate}")
+    try:
+        from google.colab import files
+        print("Upload OBELiX_DOS_PDOS_association_outputs.zip")
+        uploaded = files.upload()
+        zips = [Path("/content") / name for name in uploaded if str(name).lower().endswith(".zip")]
+        if not zips:
+            raise FileNotFoundError("No ZIP file was uploaded.")
+        return zips[0]
+    except Exception as exc:
+        raise FileNotFoundError(
+            "The previous workflow output ZIP was not found. Set INPUT_ZIP or upload it when prompted."
+        ) from exc
+
+
+def find_one(root: Path, filename: str) -> Path:
+    hits = list(root.rglob(filename))
+    if len(hits) != 1:
+        raise FileNotFoundError(f"Expected exactly one {filename}; found {len(hits)} under {root}")
+    return hits[0]
+
+
+if INPUT_RESULTS_DIR is not None and Path(INPUT_RESULTS_DIR).exists():
+    DATA_ROOT = Path(INPUT_RESULTS_DIR)
+else:
+    zip_input = locate_or_upload_input_zip()
+    if INPUT_ROOT.exists():
+        shutil.rmtree(INPUT_ROOT)
+    INPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_input, "r") as zf:
+        zf.extractall(INPUT_ROOT)
+    DATA_ROOT = INPUT_ROOT
+    print(f"Extracted kernel input: {zip_input}")
+
+# ----------------------------- LOAD TABLES -----------------------------
+def load_feature(filename):
+    p = find_one(DATA_ROOT, filename)
+    df = pd.read_csv(p, dtype={"ID": str})
+    if "ID" not in df.columns:
+        raise ValueError(f"ID column missing from {p}")
+    df["ID"] = df["ID"].astype(str).str.strip().str.lower()
+    return df.set_index("ID")
+
+
+width_tag = f"{PRIMARY_BIN_WIDTH_THz:g}THz"
+train_li = load_feature(f"train_li_shape_{width_tag}.csv")
+test_li = load_feature(f"test_li_shape_{width_tag}.csv")
+train_total = load_feature(f"train_total_shape_{width_tag}.csv")
+test_total = load_feature(f"test_total_shape_{width_tag}.csv")
+static_all = load_feature("composition_and_static_confounders.csv")
+
+TRAIN_CSV = "https://raw.githubusercontent.com/NRC-Mila/OBELiX/main/data/downloads/train.csv"
+TEST_CSV = "https://raw.githubusercontent.com/NRC-Mila/OBELiX/main/data/downloads/test.csv"
+
+
+def load_obelix_metadata(url, split):
+    try:
+        df = pd.read_csv(url, dtype={"ID": str})
+    except Exception:
+        try:
+            from google.colab import files
+            print(f"Could not download official {split}.csv. Upload it now.")
+            uploaded = files.upload()
+            names = [n for n in uploaded if n.lower().endswith((".csv", ".xlsx"))]
+            if not names:
+                raise FileNotFoundError(f"No metadata table uploaded for {split}.")
+            name = names[0]
+            df = pd.read_excel(name, dtype={"ID": str}) if name.lower().endswith(".xlsx") else pd.read_csv(name, dtype={"ID": str})
+        except Exception as exc:
+            raise RuntimeError(f"Could not load OBELiX {split} metadata.") from exc
+    df["ID"] = df["ID"].astype(str).str.strip().str.lower()
+    df["split"] = split
+    return df.set_index("ID", drop=False)
+
+
+train_meta_raw = load_obelix_metadata(TRAIN_CSV, "train")
+test_meta_raw = load_obelix_metadata(TEST_CSV, "test")
+
+
+def parse_conductivity(value):
+    if pd.isna(value):
+        return np.nan, False, ""
+    s = str(value).strip().replace("−", "-").replace("×", "x")
+    comparator = "<" if "<" in s else (">" if ">" in s else "")
+    s = re.sub(r"([0-9.]+)\s*[xX]\s*10\s*\^?\s*([-+]?\d+)", r"\1e\2", s)
+    m = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", s)
+    if not m:
+        return np.nan, False, comparator
+    val = float(m.group(0))
+    return val, comparator == "<", comparator
+
+
+def prepare_meta(meta):
+    out = meta.copy()
+    parsed = out["Ionic conductivity (S cm-1)"].map(parse_conductivity)
+    out["ic_reported"] = [x[0] for x in parsed]
+    out["ic_is_upper_limit"] = [x[1] for x in parsed]
+    out.loc[out["ic_reported"] <= 0, "ic_reported"] = np.nan
+    out["ic_limit"] = out["ic_reported"]
+    out["ic_half_limit"] = np.where(out["ic_is_upper_limit"], 0.5 * out["ic_reported"], out["ic_reported"])
+    out["ic_exclude"] = np.where(out["ic_is_upper_limit"], np.nan, out["ic_reported"])
+    for policy in ["limit", "half_limit", "exclude"]:
+        out[f"log10_ic_{policy}"] = np.log10(pd.to_numeric(out[f"ic_{policy}"], errors="coerce"))
+    if "Family" not in out.columns:
+        out["Family"] = "Unknown"
+    out["Family"] = out["Family"].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+    if "DOI" not in out.columns:
+        out["DOI"] = ""
+    return out
+
+
+train_meta = prepare_meta(train_meta_raw)
+test_meta = prepare_meta(test_meta_raw)
+
+# --------------------------- DATA PREPARATION --------------------------
+def common_numeric_columns(train_df, test_df):
+    cols = train_df.columns.intersection(test_df.columns)
+    valid = []
+    for c in cols:
+        a = pd.to_numeric(train_df[c], errors="coerce")
+        b = pd.to_numeric(test_df[c], errors="coerce")
+        if a.notna().any() or b.notna().any():
+            valid.append(c)
+    return valid
+
+
+li_cols = common_numeric_columns(train_li, test_li)
+total_cols = common_numeric_columns(train_total, test_total)
+static_cols = common_numeric_columns(static_all.loc[static_all.index.intersection(train_meta.index)], static_all.loc[static_all.index.intersection(test_meta.index)])
+
+
+def row_normalize(X):
+    X = np.asarray(X, dtype=float)
+    X = np.clip(np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
+    sums = X.sum(axis=1, keepdims=True)
+    if np.any(sums <= 0):
+        raise ValueError("At least one normalized spectrum has zero area.")
+    return X / sums
+
+
+def parse_bin_centers(columns):
+    centers = []
+    for c in columns:
+        m = re.search(r"_(\d+\.\d+)_(\d+\.\d+)THz$", str(c))
+        if not m:
+            raise ValueError(f"Could not parse frequency interval from {c}")
+        centers.append(0.5 * (float(m.group(1)) + float(m.group(2))))
+    return np.asarray(centers, float)
+
+
+li_centers = parse_bin_centers(li_cols)
+total_centers = parse_bin_centers(total_cols)
+if len(li_centers) != len(total_centers) or not np.allclose(li_centers, total_centers):
+    raise ValueError("Li-PDOS and total-DOS frequency grids do not match.")
+FREQ_CENTERS = li_centers
+BIN_WIDTH = float(np.median(np.diff(FREQ_CENTERS))) if len(FREQ_CENTERS) > 1 else PRIMARY_BIN_WIDTH_THz
+
+
+def clr_transform(P, eps=CLR_PSEUDOCOUNT):
+    P = np.asarray(P, float)
+    Q = P + eps
+    Q /= Q.sum(axis=1, keepdims=True)
+    L = np.log(Q)
+    return L - L.mean(axis=1, keepdims=True)
+
+
+def quantile_embedding(P, centers, n_quantiles=WASSERSTEIN_QUANTILES):
+    u = (np.arange(n_quantiles, dtype=float) + 0.5) / n_quantiles
+    out = np.empty((P.shape[0], n_quantiles), dtype=float)
+    left_edge = max(FREQ_MIN_THz, float(centers[0] - 0.5 * BIN_WIDTH))
+    for i, row in enumerate(P):
+        cdf = np.cumsum(row)
+        cdf[-1] = 1.0
+        # Discrete inverse CDF. searchsorted remains well-defined when the CDF
+        # has plateaus caused by zero-weight frequency bins.
+        indices = np.searchsorted(cdf, u, side="left")
+        indices = np.clip(indices, 0, len(centers) - 1)
+        out[i] = centers[indices]
+    return out
+
+
+class UnionFind:
+    def __init__(self, n):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self.rank[ra] < self.rank[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        if self.rank[ra] == self.rank[rb]:
+            self.rank[ra] += 1
+
+
+def leakage_groups(meta_subset):
+    """Connected components linking entries that share composition or DOI."""
+    n = len(meta_subset)
+    uf = UnionFind(n)
+    for col in ["Reduced Composition", "DOI"]:
+        if col not in meta_subset.columns:
+            continue
+        buckets = defaultdict(list)
+        for i, val in enumerate(meta_subset[col].fillna("").astype(str).str.strip()):
+            if val and val.lower() not in {"nan", "none"}:
+                buckets[val.lower()].append(i)
+        for inds in buckets.values():
+            for j in inds[1:]:
+                uf.union(inds[0], j)
+    roots = [uf.find(i) for i in range(n)]
+    mapping = {r: k for k, r in enumerate(sorted(set(roots)))}
+    return np.asarray([mapping[r] for r in roots], dtype=int)
+
+
+@dataclass
+class KernelContext:
+    policy: str
+    train_ids: np.ndarray
+    test_ids: np.ndarray
+    y_train: np.ndarray
+    y_test: np.ndarray
+    groups_train: np.ndarray
+    family_train: np.ndarray
+    family_test: np.ndarray
+    meta_train: pd.DataFrame
+    meta_test: pd.DataFrame
+    train_arrays: dict
+    test_arrays: dict
+
+
+def make_context(policy):
+    target = f"log10_ic_{policy}"
+    train_ids = train_li.index.intersection(train_total.index).intersection(static_all.index).intersection(train_meta.index)
+    test_ids = test_li.index.intersection(test_total.index).intersection(static_all.index).intersection(test_meta.index)
+    train_ids = train_ids[np.isfinite(train_meta.loc[train_ids, target].to_numpy(float))]
+    test_ids = test_ids[np.isfinite(test_meta.loc[test_ids, target].to_numpy(float))]
+
+    li_tr = row_normalize(train_li.loc[train_ids, li_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float))
+    li_te = row_normalize(test_li.loc[test_ids, li_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float))
+    to_tr = row_normalize(train_total.loc[train_ids, total_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float))
+    to_te = row_normalize(test_total.loc[test_ids, total_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float))
+    st_tr = static_all.loc[train_ids, static_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+    st_te = static_all.loc[test_ids, static_cols].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+
+    train_arrays = {
+        "li_raw": li_tr,
+        "li_clr": clr_transform(li_tr),
+        "li_cdf": np.cumsum(li_tr, axis=1) * BIN_WIDTH,
+        "li_w2": quantile_embedding(li_tr, FREQ_CENTERS),
+        "total_raw": to_tr,
+        "total_cdf": np.cumsum(to_tr, axis=1) * BIN_WIDTH,
+        "total_w2": quantile_embedding(to_tr, FREQ_CENTERS),
+        "static": st_tr,
+    }
+    test_arrays = {
+        "li_raw": li_te,
+        "li_clr": clr_transform(li_te),
+        "li_cdf": np.cumsum(li_te, axis=1) * BIN_WIDTH,
+        "li_w2": quantile_embedding(li_te, FREQ_CENTERS),
+        "total_raw": to_te,
+        "total_cdf": np.cumsum(to_te, axis=1) * BIN_WIDTH,
+        "total_w2": quantile_embedding(to_te, FREQ_CENTERS),
+        "static": st_te,
+    }
+    mt = train_meta.loc[train_ids].copy()
+    me = test_meta.loc[test_ids].copy()
+    return KernelContext(
+        policy=policy,
+        train_ids=np.asarray(train_ids), test_ids=np.asarray(test_ids),
+        y_train=mt[target].to_numpy(float), y_test=me[target].to_numpy(float),
+        groups_train=leakage_groups(mt),
+        family_train=mt["Family"].to_numpy(str), family_test=me["Family"].to_numpy(str),
+        meta_train=mt, meta_test=me,
+        train_arrays=train_arrays, test_arrays=test_arrays,
+    )
+
+
+CTX = make_context(PRIMARY_CENSOR_POLICY)
+print(f"Paired kernel cohort: train={len(CTX.train_ids)}, test={len(CTX.test_ids)}")
+print(f"Frequency grid: {len(FREQ_CENTERS)} bins, {FREQ_CENTERS[0]:g}–{FREQ_CENTERS[-1]:g} THz centers")
+
+cohort_table = pd.concat([
+    CTX.meta_train.assign(kernel_split="train"),
+    CTX.meta_test.assign(kernel_split="test")
+], axis=0)
+cohort_table.to_csv(TABLES / "kernel_cohort_metadata.csv", index=False)
+
+# ------------------------- GPU KERNEL ENGINE ---------------------------
+def to_tensor(x):
+    return torch.as_tensor(np.asarray(x), dtype=DTYPE, device=DEVICE)
+
+
+def squared_distances(A, B):
+    At, Bt = to_tensor(A), to_tensor(B)
+    return torch.cdist(At, Bt, p=2.0).pow(2)
+
+
+def median_positive_distance(D2):
+    n = D2.shape[0]
+    vals = D2[torch.triu_indices(n, n, offset=1, device=DEVICE).unbind()]
+    vals = vals[vals > 1e-24]
+    if vals.numel() == 0:
+        return 1.0
+    return float(torch.sqrt(torch.median(vals)).item())
+
+
+def normalize_kernel(Ktr, Kcross):
+    scale = torch.mean(torch.diagonal(Ktr))
+    scale = torch.clamp(scale, min=1e-12)
+    return Ktr / scale, Kcross / scale
+
+
+def center_kernel(Ktr, Kcross):
+    col_mean = Ktr.mean(dim=0, keepdim=True)
+    row_mean = Ktr.mean(dim=1, keepdim=True)
+    grand = Ktr.mean()
+    Ktrc = Ktr - row_mean - col_mean + grand
+    Kxc = Kcross - Kcross.mean(dim=1, keepdim=True) - col_mean + grand
+    return Ktrc, Kxc
+
+
+COMPONENT_MAP = {
+    "li_linear": ("li_raw", "linear"),
+    "li_rbf": ("li_raw", "rbf"),
+    "li_clr_rbf": ("li_clr", "rbf"),
+    "li_cdf_rbf": ("li_cdf", "rbf"),
+    "li_wasserstein": ("li_w2", "rbf"),
+    "total_rbf": ("total_raw", "rbf"),
+    "total_cdf_rbf": ("total_cdf", "rbf"),
+    "total_wasserstein": ("total_w2", "rbf"),
+    "static_rbf": ("static", "rbf"),
+}
+
+
+class KernelEngine:
+    def __init__(self, context):
+        self.ctx = context
+        self.cache = {}
+
+    def _prepare_arrays(self, component, fit_idx, eval_idx, eval_split):
+        source, kind = COMPONENT_MAP[component]
+        Xfit = self.ctx.train_arrays[source][fit_idx]
+        Xeval = self.ctx.train_arrays[source][eval_idx] if eval_split == "train" else self.ctx.test_arrays[source][eval_idx]
+        if source == "static":
+            imp = SimpleImputer(strategy="median")
+            scaler = StandardScaler()
+            Xfit = scaler.fit_transform(imp.fit_transform(Xfit))
+            Xeval = scaler.transform(imp.transform(Xeval))
+        elif kind == "linear":
+            scaler = StandardScaler()
+            Xfit = scaler.fit_transform(Xfit)
+            Xeval = scaler.transform(Xeval)
+        return Xfit, Xeval, kind
+
+    def component_kernel(self, component, fit_idx, eval_idx, eval_split="train", scale_mult=1.0):
+        key = (component, tuple(np.asarray(fit_idx, int)), tuple(np.asarray(eval_idx, int)), eval_split)
+        if key not in self.cache:
+            Xfit, Xeval, kind = self._prepare_arrays(component, np.asarray(fit_idx), np.asarray(eval_idx), eval_split)
+            if kind == "linear":
+                A, B = to_tensor(Xfit), to_tensor(Xeval)
+                Ktr = (A @ A.T) / max(A.shape[1], 1)
+                Kx = (B @ A.T) / max(A.shape[1], 1)
+                self.cache[key] = (kind, Ktr, Kx, 1.0)
+            else:
+                Dtr = squared_distances(Xfit, Xfit)
+                Dx = squared_distances(Xeval, Xfit)
+                median = median_positive_distance(Dtr)
+                self.cache[key] = (kind, Dtr, Dx, median)
+        kind, A, B, median = self.cache[key]
+        if kind == "linear":
+            return normalize_kernel(A, B)
+        ell = max(float(scale_mult) * median, 1e-12)
+        Ktr = torch.exp(-A / (2.0 * ell * ell))
+        Kx = torch.exp(-B / (2.0 * ell * ell))
+        return normalize_kernel(Ktr, Kx)
+
+    def combined_kernel(self, spec, fit_idx, eval_idx, eval_split, scale_mult, weights):
+        kernels = [self.component_kernel(c, fit_idx, eval_idx, eval_split, scale_mult) for c in spec["components"]]
+        Ktr = torch.zeros_like(kernels[0][0])
+        Kx = torch.zeros_like(kernels[0][1])
+        for w, (kt, kx) in zip(weights, kernels):
+            Ktr = Ktr + float(w) * kt
+            Kx = Kx + float(w) * kx
+        return Ktr, Kx
+
+
+ENGINE = KernelEngine(CTX)
+
+# ------------------------- CV / KRR FUNCTIONS -------------------------
+def make_group_splits(indices, groups, n_splits, seed):
+    indices = np.asarray(indices, int)
+    local_groups = np.asarray(groups)[indices]
+    unique = np.unique(local_groups)
+    if len(unique) >= 3:
+        splitter = GroupKFold(n_splits=min(n_splits, len(unique)))
+        return [(indices[a], indices[b]) for a, b in splitter.split(indices, groups=local_groups)]
+    splitter = KFold(n_splits=min(n_splits, max(2, len(indices) // 10)), shuffle=True, random_state=seed)
+    return [(indices[a], indices[b]) for a, b in splitter.split(indices)]
+
+
+def eig_predictions(Ktr, Kcross, y_train, alphas):
+    Kc, Kxc = center_kernel(Ktr, Kcross)
+    y = to_tensor(y_train)
+    mean = y.mean()
+    yc = y - mean
+    eigvals, eigvecs = torch.linalg.eigh(Kc)
+    eigvals = torch.clamp(eigvals, min=0.0)
+    proj = eigvecs.T @ yc
+    aa = to_tensor(np.asarray(alphas, float))
+    coef = proj[:, None] / (eigvals[:, None] + aa[None, :])
+    preds = Kxc @ eigvecs @ coef + mean
+    return preds.detach().cpu().numpy()
+
+
+def simplex_weights(n_components, step):
+    if n_components == 1:
+        return [(1.0,)]
+    if n_components == 2:
+        return [(1.0 - w, w) for w in TWO_KERNEL_WEIGHT_GRID]
+    units = int(round(1.0 / step))
+    out = []
+    for parts in itertools.product(range(units + 1), repeat=n_components):
+        if sum(parts) == units:
+            out.append(tuple(p / units for p in parts))
+    return out
+
+
+def parameter_grid(spec):
+    components = spec["components"]
+    weights = simplex_weights(len(components), THREE_KERNEL_WEIGHT_STEP)
+    if len(components) == 1 and COMPONENT_MAP[components[0]][1] == "linear":
+        scales = (1.0,)
+    elif spec.get("additive", False):
+        scales = ADDITIVE_KERNEL_SCALE_GRID
+    else:
+        scales = SINGLE_KERNEL_SCALE_GRID
+    return scales, weights
+
+
+def tune_model(context, engine, spec, subset_idx, seed):
+    subset_idx = np.asarray(subset_idx, int)
+    splits = make_group_splits(subset_idx, context.groups_train, INNER_FOLDS, seed)
+    scales, weights_grid = parameter_grid(spec)
+    records = []
+    best = None
+
+    for scale in scales:
+        for weights in weights_grid:
+            fold_mae = np.zeros((len(splits), len(ALPHA_GRID)), dtype=float)
+            for f, (tr_idx, va_idx) in enumerate(splits):
+                Ktr, Kva = engine.combined_kernel(spec, tr_idx, va_idx, "train", scale, weights)
+                pred = eig_predictions(Ktr, Kva, context.y_train[tr_idx], ALPHA_GRID)
+                fold_mae[f] = np.mean(np.abs(context.y_train[va_idx, None] - pred), axis=0)
+            mean_mae = fold_mae.mean(axis=0)
+            sd_mae = fold_mae.std(axis=0, ddof=1) if len(splits) > 1 else np.zeros_like(mean_mae)
+            for i, alpha in enumerate(ALPHA_GRID):
+                row = {
+                    "scale_mult": float(scale), "weights": tuple(float(x) for x in weights),
+                    "alpha": float(alpha), "cv_MAE": float(mean_mae[i]), "cv_MAE_sd": float(sd_mae[i]),
+                }
+                records.append(row)
+                key = (row["cv_MAE"], row["cv_MAE_sd"], -row["alpha"])
+                if best is None or key < best[0]:
+                    best = (key, row)
+    return best[1], pd.DataFrame(records)
+
+
+def predict_with_params(context, engine, spec, fit_idx, eval_idx, eval_split, params):
+    Ktr, Kx = engine.combined_kernel(
+        spec, np.asarray(fit_idx, int), np.asarray(eval_idx, int), eval_split,
+        params["scale_mult"], params["weights"]
+    )
+    pred = eig_predictions(Ktr, Kx, context.y_train[np.asarray(fit_idx, int)], [params["alpha"]])[:, 0]
+    return pred
+
+
+def metrics(y, pred):
+    rho = stats.spearmanr(y, pred).statistic if len(y) > 2 else np.nan
+    return {
+        "MAE": float(mean_absolute_error(y, pred)),
+        "RMSE": float(math.sqrt(mean_squared_error(y, pred))),
+        "R2": float(r2_score(y, pred)),
+        "Spearman_rho": float(rho),
+    }
+
+
+def run_nested_model(context, engine, model_name, spec):
+    n = len(context.y_train)
+    all_idx = np.arange(n)
+    outer = make_group_splits(all_idx, context.groups_train, OUTER_FOLDS, RANDOM_SEED + 17)
+    oof = np.full(n, np.nan)
+    outer_rows = []
+    search_frames = []
+
+    print(f"\n[{model_name}] nested grouped CV")
+    for fold, (tr_idx, va_idx) in enumerate(outer, start=1):
+        best, search = tune_model(context, engine, spec, tr_idx, RANDOM_SEED + 1000 * fold)
+        oof[va_idx] = predict_with_params(context, engine, spec, tr_idx, va_idx, "train", best)
+        row = {"model": model_name, "outer_fold": fold, **best, **metrics(context.y_train[va_idx], oof[va_idx])}
+        outer_rows.append(row)
+        search["model"] = model_name
+        search["search_scope"] = f"outer_fold_{fold}"
+        search_frames.append(search)
+        print(f"  fold {fold}: MAE={row['MAE']:.3f}; params={best}")
+
+    best_full, search_full = tune_model(context, engine, spec, all_idx, RANDOM_SEED + 99999)
+    test_idx = np.arange(len(context.y_test))
+    test_pred = predict_with_params(context, engine, spec, all_idx, test_idx, "test", best_full)
+    search_full["model"] = model_name
+    search_full["search_scope"] = "full_train"
+    search_frames.append(search_full)
+
+    result = {
+        "model": model_name, "label": spec["label"],
+        "oof_pred": oof, "test_pred": test_pred,
+        "oof_metrics": metrics(context.y_train, oof),
+        "test_metrics": metrics(context.y_test, test_pred),
+        "best_full": best_full,
+        "outer_rows": pd.DataFrame(outer_rows),
+        "search": pd.concat(search_frames, ignore_index=True),
+    }
+    print(f"  held-out test: {result['test_metrics']}")
+    return result
+
+
+# ----------------------------- RUN MODELS ------------------------------
+model_results = {}
+outer_frames = []
+search_frames = []
+for model_name, spec in MODEL_SPECS.items():
+    result = run_nested_model(CTX, ENGINE, model_name, spec)
+    model_results[model_name] = result
+    outer_frames.append(result["outer_rows"])
+    search_frames.append(result["search"])
+
+outer_df = pd.concat(outer_frames, ignore_index=True)
+search_df = pd.concat(search_frames, ignore_index=True)
+outer_df.to_csv(TABLES / "nested_grouped_outer_fold_results.csv", index=False)
+search_df.to_csv(TABLES / "nested_hyperparameter_search.csv", index=False)
+
+# Predictions and metrics
+prediction_rows = []
+metric_rows = []
+for name, res in model_results.items():
+    for oid, y, p, fam in zip(CTX.train_ids, CTX.y_train, res["oof_pred"], CTX.family_train):
+        prediction_rows.append({"ID": oid, "split": "train_OOF", "Family": fam, "model": name, "observed": y, "predicted": p})
+    for oid, y, p, fam in zip(CTX.test_ids, CTX.y_test, res["test_pred"], CTX.family_test):
+        prediction_rows.append({"ID": oid, "split": "test", "Family": fam, "model": name, "observed": y, "predicted": p})
+    metric_rows.append({"model": name, "label": res["label"], "evaluation": "nested_train_OOF", "n": len(CTX.y_train), **res["oof_metrics"]})
+    metric_rows.append({"model": name, "label": res["label"], "evaluation": "official_test", "n": len(CTX.y_test), **res["test_metrics"]})
+
+pred_df = pd.DataFrame(prediction_rows)
+metrics_df = pd.DataFrame(metric_rows)
+pred_df.to_csv(PRED_DIR / "all_kernel_predictions.csv", index=False)
+metrics_df.to_csv(TABLES / "kernel_performance_summary.csv", index=False)
+
+# ---------------------- BOOTSTRAP UNCERTAINTY -------------------------
+def safe_metric(metric_name, y, p):
+    if metric_name == "MAE": return mean_absolute_error(y, p)
+    if metric_name == "RMSE": return math.sqrt(mean_squared_error(y, p))
+    if metric_name == "R2": return r2_score(y, p)
+    if metric_name == "Spearman_rho": return stats.spearmanr(y, p).statistic
+    raise ValueError(metric_name)
+
+
+rng = np.random.default_rng(RANDOM_SEED + 123)
+boot_indices = rng.integers(0, len(CTX.y_test), size=(N_BOOTSTRAP, len(CTX.y_test)))
+metric_names = ["MAE", "RMSE", "R2", "Spearman_rho"]
+bootstrap_rows = []
+boot_store = {}
+for name, res in model_results.items():
+    for metric_name in metric_names:
+        vals = np.empty(N_BOOTSTRAP, float)
+        for b, idx in enumerate(boot_indices):
+            vals[b] = safe_metric(metric_name, CTX.y_test[idx], res["test_pred"][idx])
+        boot_store[(name, metric_name)] = vals
+        bootstrap_rows.append({
+            "model": name, "metric": metric_name,
+            "point": safe_metric(metric_name, CTX.y_test, res["test_pred"]),
+            "ci95_low": float(np.nanpercentile(vals, 2.5)),
+            "ci95_high": float(np.nanpercentile(vals, 97.5)),
+            "n_bootstrap": N_BOOTSTRAP,
+        })
+bootstrap_df = pd.DataFrame(bootstrap_rows)
+bootstrap_df.to_csv(TABLES / "heldout_bootstrap_metric_intervals.csv", index=False)
+
+baseline_name = "static_rbf"
+paired_rows = []
+for name in model_results:
+    if name == baseline_name:
+        continue
+    for metric_name in metric_names:
+        if metric_name in {"MAE", "RMSE"}:
+            diff = boot_store[(name, metric_name)] - boot_store[(baseline_name, metric_name)]
+            point = safe_metric(metric_name, CTX.y_test, model_results[name]["test_pred"]) - safe_metric(metric_name, CTX.y_test, model_results[baseline_name]["test_pred"])
+            better_direction = "negative"
+        else:
+            diff = boot_store[(name, metric_name)] - boot_store[(baseline_name, metric_name)]
+            point = safe_metric(metric_name, CTX.y_test, model_results[name]["test_pred"]) - safe_metric(metric_name, CTX.y_test, model_results[baseline_name]["test_pred"])
+            better_direction = "positive"
+        p_two = min(1.0, 2.0 * min(np.mean(diff <= 0), np.mean(diff >= 0)))
+        paired_rows.append({
+            "model": name, "baseline": baseline_name, "metric": metric_name,
+            "difference_model_minus_baseline": float(point),
+            "ci95_low": float(np.nanpercentile(diff, 2.5)),
+            "ci95_high": float(np.nanpercentile(diff, 97.5)),
+            "bootstrap_p_two_sided": float(p_two),
+            "better_direction": better_direction,
+        })
+paired_df = pd.DataFrame(paired_rows)
+paired_df.to_csv(TABLES / "paired_bootstrap_differences_vs_static.csv", index=False)
+
+# ----------------------------- HSIC TESTS ------------------------------
+def center_square_kernel(K):
+    return K - K.mean(0, keepdim=True) - K.mean(1, keepdim=True) + K.mean()
+
+
+def target_rbf(y):
+    yy = np.asarray(y, float)[:, None]
+    D2 = squared_distances(yy, yy)
+    med = median_positive_distance(D2)
+    return torch.exp(-D2 / (2.0 * max(med, 1e-12) ** 2))
+
+
+def normalized_hsic(K, L):
+    Kc, Lc = center_square_kernel(K), center_square_kernel(L)
+    num = torch.sum(Kc * Lc)
+    den = torch.sqrt(torch.sum(Kc * Kc) * torch.sum(Lc * Lc)).clamp(min=1e-15)
+    return float((num / den).item()), Kc, Lc
+
+
+def block_permutation_indices(labels, batch_size, rng):
+    labels = np.asarray(labels)
+    n = len(labels)
+    out = np.tile(np.arange(n), (batch_size, 1))
+    for b in range(batch_size):
+        for lab in np.unique(labels):
+            loc = np.where(labels == lab)[0]
+            if len(loc) > 1:
+                out[b, loc] = rng.permutation(loc)
+    return out
+
+
+def hsic_permutation_test(K, y, n_perm, within_labels=None, seed=0):
+    L = target_rbf(y)
+    observed, Kc, Lc = normalized_hsic(K, L)
+    denom = torch.sqrt(torch.sum(Kc * Kc) * torch.sum(Lc * Lc)).clamp(min=1e-15)
+    rng = np.random.default_rng(seed)
+    count = 0
+    null_sum = 0.0
+    null_sq = 0.0
+    done = 0
+    n = len(y)
+    while done < n_perm:
+        b = min(HSIC_BATCH_SIZE, n_perm - done)
+        if within_labels is None:
+            perm = np.argsort(rng.random((b, n)), axis=1)
+        else:
+            perm = block_permutation_indices(within_labels, b, rng)
+        pt = torch.as_tensor(perm, dtype=torch.long, device=DEVICE)
+        Lp = Lc[pt[:, :, None], pt[:, None, :]]
+        vals = torch.einsum("ij,bij->b", Kc, Lp) / denom
+        arr = vals.detach().cpu().numpy()
+        count += int(np.sum(arr >= observed))
+        null_sum += float(arr.sum())
+        null_sq += float(np.square(arr).sum())
+        done += b
+    mean = null_sum / n_perm
+    sd = math.sqrt(max(null_sq / n_perm - mean * mean, 0.0))
+    return {
+        "normalized_HSIC": observed,
+        "permutation_p": (count + 1) / (n_perm + 1),
+        "null_mean": mean,
+        "null_sd": sd,
+        "n_permutations": n_perm,
+    }
+
+
+def full_train_component_kernel(component, scale):
+    idx = np.arange(len(CTX.y_train))
+    K, _ = ENGINE.component_kernel(component, idx, idx, "train", scale)
+    return K
+
+
+# HSIC bandwidths use the unsupervised median heuristic (scale=1), not
+# supervised KRR-selected bandwidths. This avoids selection-induced inflation
+# of permutation significance.
+hsic_components = [
+    "static_rbf", "li_rbf", "li_clr_rbf", "li_cdf_rbf",
+    "li_wasserstein", "total_rbf", "total_cdf_rbf", "total_wasserstein"
+]
+hsic_rows = []
+full_kernels = {}
+for component in hsic_components:
+    K = full_train_component_kernel(component, 1.0)
+    full_kernels[component] = K
+    global_test = hsic_permutation_test(K, CTX.y_train, N_HSIC_PERMUTATIONS, None, RANDOM_SEED + len(hsic_rows))
+    family_test = hsic_permutation_test(K, CTX.y_train, N_HSIC_PERMUTATIONS, CTX.family_train, RANDOM_SEED + 100 + len(hsic_rows))
+    hsic_rows.append({"component": component, "permutation_scheme": "global", **global_test})
+    hsic_rows.append({"component": component, "permutation_scheme": "within_Family", **family_test})
+
+# Cross-fitted static residual HSIC.
+static_oof = model_results["static_rbf"]["oof_pred"]
+residual_y = CTX.y_train - static_oof
+for component in ["li_wasserstein", "total_wasserstein", "li_cdf_rbf", "total_cdf_rbf"]:
+    K = full_kernels[component]
+    global_test = hsic_permutation_test(K, residual_y, N_HSIC_PERMUTATIONS, None, RANDOM_SEED + 500 + len(hsic_rows))
+    family_test = hsic_permutation_test(K, residual_y, N_HSIC_PERMUTATIONS, CTX.family_train, RANDOM_SEED + 700 + len(hsic_rows))
+    hsic_rows.append({"component": component + "__static_OOF_residual", "permutation_scheme": "global", **global_test})
+    hsic_rows.append({"component": component + "__static_OOF_residual", "permutation_scheme": "within_Family", **family_test})
+
+hsic_df = pd.DataFrame(hsic_rows)
+
+def bh_adjust(pvalues):
+    p = np.asarray(pvalues, float)
+    order = np.argsort(p)
+    ranked = p[order]
+    adjusted = ranked * len(p) / np.arange(1, len(p) + 1)
+    adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
+    out = np.empty_like(adjusted)
+    out[order] = np.clip(adjusted, 0.0, 1.0)
+    return out
+
+for scheme, inds in hsic_df.groupby("permutation_scheme").groups.items():
+    hsic_df.loc[inds, "permutation_p_BH_FDR"] = bh_adjust(hsic_df.loc[inds, "permutation_p"].to_numpy(float))
+hsic_df.to_csv(TABLES / "HSIC_dependence_tests.csv", index=False)
+
+# Direct paired comparison: Li versus total Wasserstein HSIC using identical permutations.
+def hsic_difference_test(K1, K2, y, n_perm, seed):
+    L = target_rbf(y)
+    s1, K1c, Lc = normalized_hsic(K1, L)
+    s2, K2c, _ = normalized_hsic(K2, L)
+    d_obs = s1 - s2
+    den1 = torch.sqrt(torch.sum(K1c*K1c)*torch.sum(Lc*Lc)).clamp(min=1e-15)
+    den2 = torch.sqrt(torch.sum(K2c*K2c)*torch.sum(Lc*Lc)).clamp(min=1e-15)
+    rng = np.random.default_rng(seed)
+    ge = 0; done = 0; null = []
+    n = len(y)
+    while done < n_perm:
+        b = min(HSIC_BATCH_SIZE, n_perm-done)
+        perm = np.argsort(rng.random((b,n)), axis=1)
+        pt = torch.as_tensor(perm, dtype=torch.long, device=DEVICE)
+        Lp = Lc[pt[:,:,None], pt[:,None,:]]
+        v1 = torch.einsum("ij,bij->b", K1c, Lp)/den1
+        v2 = torch.einsum("ij,bij->b", K2c, Lp)/den2
+        d = (v1-v2).detach().cpu().numpy()
+        ge += int(np.sum(d >= d_obs)); null.extend(d.tolist()); done += b
+    return {
+        "HSIC_Li": s1, "HSIC_total": s2, "difference_Li_minus_total": d_obs,
+        "one_sided_permutation_p": (ge+1)/(n_perm+1),
+        "null_ci95_low": float(np.percentile(null,2.5)),
+        "null_ci95_high": float(np.percentile(null,97.5)),
+    }
+
+hsic_diff = hsic_difference_test(full_kernels["li_wasserstein"], full_kernels["total_wasserstein"], CTX.y_train, N_HSIC_PERMUTATIONS, RANDOM_SEED+900)
+pd.DataFrame([hsic_diff]).to_csv(TABLES / "HSIC_Li_vs_total_Wasserstein.csv", index=False)
+
+# ----------------------- LEAVE-ONE-FAMILY-OUT -------------------------
+lofo_rows = []
+if RUN_LOFO:
+    lofo_models = ["static_rbf", "li_wasserstein", "static_plus_li_wasserstein"]
+    families, counts = np.unique(CTX.family_train, return_counts=True)
+    eligible = [f for f, c in zip(families, counts) if c >= MIN_FAMILY_SIZE_LOFO and f != "Unknown"]
+    print(f"\nLOFO families (n>={MIN_FAMILY_SIZE_LOFO}): {eligible}")
+    for family in eligible:
+        hold = np.where(CTX.family_train == family)[0]
+        fit = np.where(CTX.family_train != family)[0]
+        for model_name in lofo_models:
+            spec = MODEL_SPECS[model_name]
+            best, _ = tune_model(CTX, ENGINE, spec, fit, RANDOM_SEED + zlib.crc32(f"{family}|{model_name}".encode()) % 100000)
+            pred = predict_with_params(CTX, ENGINE, spec, fit, hold, "train", best)
+            for oid, y, p in zip(CTX.train_ids[hold], CTX.y_train[hold], pred):
+                lofo_rows.append({
+                    "Family": family, "ID": oid, "model": model_name,
+                    "observed": y, "predicted": p, **best,
+                })
+    lofo_pred = pd.DataFrame(lofo_rows)
+    lofo_pred.to_csv(PRED_DIR / "leave_one_family_out_predictions.csv", index=False)
+    lofo_metric_rows = []
+    if not lofo_pred.empty:
+        for (family, model), grp in lofo_pred.groupby(["Family", "model"]):
+            lofo_metric_rows.append({"Family": family, "model": model, "n": len(grp), **metrics(grp["observed"], grp["predicted"])})
+        for model, grp in lofo_pred.groupby("model"):
+            lofo_metric_rows.append({"Family": "ALL_ELIGIBLE_FAMILIES", "model": model, "n": len(grp), **metrics(grp["observed"], grp["predicted"])})
+    pd.DataFrame(lofo_metric_rows).to_csv(TABLES / "leave_one_family_out_performance.csv", index=False)
+
+# ---------------------- CENSORING SENSITIVITY -------------------------
+sensitivity_rows = []
+if RUN_CENSOR_SENSITIVITY:
+    sensitivity_models = ["static_rbf", "li_wasserstein", "static_plus_li_wasserstein"]
+    for policy in ["limit", "half_limit", "exclude"]:
+        cctx = CTX if policy == PRIMARY_CENSOR_POLICY else make_context(policy)
+        cengine = ENGINE if policy == PRIMARY_CENSOR_POLICY else KernelEngine(cctx)
+        all_idx = np.arange(len(cctx.y_train))
+        test_idx = np.arange(len(cctx.y_test))
+        for model_name in sensitivity_models:
+            spec = MODEL_SPECS[model_name]
+            if policy == PRIMARY_CENSOR_POLICY:
+                best = model_results[model_name]["best_full"]
+                pred = model_results[model_name]["test_pred"]
+            else:
+                best, _ = tune_model(cctx, cengine, spec, all_idx, RANDOM_SEED + zlib.crc32(f"{policy}|{model_name}".encode()) % 100000)
+                pred = predict_with_params(cctx, cengine, spec, all_idx, test_idx, "test", best)
+            sensitivity_rows.append({
+                "censor_policy": policy, "model": model_name,
+                "n_train": len(cctx.y_train), "n_test": len(cctx.y_test),
+                **best, **metrics(cctx.y_test, pred)
+            })
+pd.DataFrame(sensitivity_rows).to_csv(TABLES / "censoring_policy_kernel_sensitivity.csv", index=False)
+
+# ----------------------- SAVE KERNEL MATRICES -------------------------
+if SAVE_KERNEL_MATRICES:
+    order = np.argsort(CTX.y_train)
+    for component in ["static_rbf", "li_wasserstein", "total_wasserstein", "li_cdf_rbf", "total_cdf_rbf"]:
+        K = full_kernels[component].detach().cpu().numpy()
+        pd.DataFrame(K, index=CTX.train_ids, columns=CTX.train_ids).to_csv(KERNELS_DIR / f"train_kernel_{component}.csv.gz", compression="gzip")
+        plt.figure(figsize=(6.5, 5.6))
+        plt.imshow(K[np.ix_(order, order)], aspect="auto", origin="lower")
+        plt.xlabel("Materials ordered by conductivity")
+        plt.ylabel("Materials ordered by conductivity")
+        plt.title(component.replace("_", " "))
+        plt.colorbar(label="Kernel similarity")
+        plt.tight_layout()
+        plt.savefig(FIGURES / f"kernel_heatmap_{component}.png", dpi=300)
+        plt.close()
+
+# ------------------------------- FIGURES -------------------------------
+# Held-out MAE with bootstrap intervals.
+mae_boot = bootstrap_df[bootstrap_df["metric"] == "MAE"].copy()
+mae_boot["label"] = mae_boot["model"].map({k:v["label"] for k,v in MODEL_SPECS.items()})
+mae_boot = mae_boot.sort_values("point")
+plt.figure(figsize=(9.5, max(5.0, 0.42 * len(mae_boot))))
+ypos = np.arange(len(mae_boot))
+err = np.vstack([mae_boot["point"]-mae_boot["ci95_low"], mae_boot["ci95_high"]-mae_boot["point"]])
+plt.errorbar(mae_boot["point"], ypos, xerr=err, fmt="o", capsize=3)
+plt.yticks(ypos, mae_boot["label"])
+plt.xlabel("Official-test MAE in log$_{10}$(S cm$^{-1}$)")
+plt.title("Kernel model performance with paired bootstrap intervals")
+plt.tight_layout()
+plt.savefig(FIGURES / "01_kernel_test_MAE_bootstrap.png", dpi=300)
+plt.close()
+
+# Parity plots for three principal models, each as a separate figure.
+for num, name in enumerate(["static_rbf", "li_wasserstein", "static_plus_li_wasserstein"], start=2):
+    pred = model_results[name]["test_pred"]
+    lo = min(np.min(CTX.y_test), np.min(pred)); hi = max(np.max(CTX.y_test), np.max(pred))
+    plt.figure(figsize=(5.8, 5.4))
+    plt.scatter(CTX.y_test, pred, s=38, alpha=0.8)
+    plt.plot([lo, hi], [lo, hi], linestyle="--")
+    m = model_results[name]["test_metrics"]
+    plt.xlabel("Observed log$_{10}$ conductivity")
+    plt.ylabel("Predicted log$_{10}$ conductivity")
+    plt.title(f"{MODEL_SPECS[name]['label']}\nMAE={m['MAE']:.2f}, $R^2$={m['R2']:.2f}, $\\rho$={m['Spearman_rho']:.2f}")
+    plt.tight_layout()
+    plt.savefig(FIGURES / f"{num:02d}_parity_{name}.png", dpi=300)
+    plt.close()
+
+# HSIC summary.
+hplot = hsic_df[(hsic_df["permutation_scheme"] == "global") & (~hsic_df["component"].str.contains("residual"))].copy()
+hplot = hplot.sort_values("normalized_HSIC")
+plt.figure(figsize=(8.2, 5.8))
+plt.barh(hplot["component"], hplot["normalized_HSIC"])
+for i, (_, row) in enumerate(hplot.iterrows()):
+    plt.text(row["normalized_HSIC"], i, f" p={row['permutation_p']:.3g}", va="center", fontsize=8)
+plt.xlabel("Normalized HSIC")
+plt.title("Whole-spectrum nonlinear dependence with conductivity")
+plt.tight_layout()
+plt.savefig(FIGURES / "05_HSIC_global_dependence.png", dpi=300)
+plt.close()
+
+# Selected additive weights across outer folds.
+weight_rows = outer_df[outer_df["model"].isin(["static_plus_li_wasserstein", "static_plus_total_wasserstein", "static_plus_li_plus_total"])].copy()
+if not weight_rows.empty:
+    expanded = []
+    for _, row in weight_rows.iterrows():
+        w = row["weights"] if isinstance(row["weights"], tuple) else ast.literal_eval(str(row["weights"]))
+        for comp, value in zip(MODEL_SPECS[row["model"]]["components"], w):
+            expanded.append({"model": row["model"], "outer_fold": row["outer_fold"], "component": comp, "weight": value})
+    wdf = pd.DataFrame(expanded)
+    wdf.to_csv(TABLES / "outer_fold_selected_kernel_weights.csv", index=False)
+    summary_w = wdf.groupby(["model", "component"])["weight"].agg(["mean", "std"]).reset_index()
+    labels = summary_w["model"] + " | " + summary_w["component"]
+    plt.figure(figsize=(9.2, max(4.8, 0.42 * len(summary_w))))
+    y = np.arange(len(summary_w))
+    plt.errorbar(summary_w["mean"], y, xerr=summary_w["std"].fillna(0), fmt="o", capsize=3)
+    plt.yticks(y, labels)
+    plt.xlim(-0.05, 1.05)
+    plt.xlabel("Kernel weight selected in outer folds")
+    plt.title("Multiple-kernel weight stability")
+    plt.tight_layout()
+    plt.savefig(FIGURES / "06_additive_kernel_weight_stability.png", dpi=300)
+    plt.close()
+
+# LOFO aggregate model comparison.
+lofo_perf_path = TABLES / "leave_one_family_out_performance.csv"
+if lofo_perf_path.exists():
+    ldf = pd.read_csv(lofo_perf_path)
+    agg = ldf[ldf["Family"] == "ALL_ELIGIBLE_FAMILIES"]
+    if not agg.empty:
+        plt.figure(figsize=(7.2, 4.8))
+        plt.bar(agg["model"], agg["MAE"])
+        plt.xticks(rotation=25, ha="right")
+        plt.ylabel("LOFO MAE")
+        plt.title("Cross-family transfer on eligible OBELiX families")
+        plt.tight_layout()
+        plt.savefig(FIGURES / "07_leave_one_family_out_MAE.png", dpi=300)
+        plt.close()
+
+# ------------------------- SUMMARY / CONFIG ----------------------------
+best_test = metrics_df[metrics_df["evaluation"] == "official_test"].sort_values("MAE")
+summary_lines = [
+    "OBELiX PUBLICATION-LEVEL KERNEL ANALYSIS",
+    "=" * 55,
+    f"Device: {DEVICE_NAME}",
+    f"Primary frequency representation: normalized 1-THz bins over 0 < nu <= 100 THz",
+    f"Primary censoring policy: {PRIMARY_CENSOR_POLICY}",
+    f"Paired cohort: train={len(CTX.y_train)}, official test={len(CTX.y_test)}",
+    f"Leakage groups: connected components sharing reduced composition or DOI",
+    f"Nested CV: {OUTER_FOLDS} outer x {INNER_FOLDS} inner grouped folds",
+    f"Bootstrap replicates: {N_BOOTSTRAP}; HSIC permutations: {N_HSIC_PERMUTATIONS}",
+    "",
+    "OFFICIAL TEST PERFORMANCE",
+    best_test[["label", "n", "MAE", "RMSE", "R2", "Spearman_rho"]].to_string(index=False),
+    "",
+    "HSIC TESTS",
+    hsic_df.to_string(index=False),
+    "",
+    "LI VS TOTAL WASSERSTEIN HSIC",
+    pd.DataFrame([hsic_diff]).to_string(index=False),
+]
+if not paired_df.empty:
+    summary_lines += ["", "PAIRED BOOTSTRAP DIFFERENCES VS STATIC", paired_df.to_string(index=False)]
+summary = "\n".join(summary_lines)
+(RESULTS / "SUMMARY.txt").write_text(summary)
+print("\n" + summary)
+
+best_params_json = {
+    name: {
+        "label": MODEL_SPECS[name]["label"],
+        "components": MODEL_SPECS[name]["components"],
+        "best_full": {
+            **{k:v for k,v in res["best_full"].items() if k != "weights"},
+            "weights": list(res["best_full"]["weights"]),
+        }
+    }
+    for name, res in model_results.items()
+}
+(RESULTS / "selected_hyperparameters.json").write_text(json.dumps(best_params_json, indent=2))
+
+config = {
+    "input_zip": str(INPUT_ZIP),
+    "device": DEVICE_NAME,
+    "primary_bin_width_THz": PRIMARY_BIN_WIDTH_THz,
+    "frequency_range_THz": [FREQ_MIN_THz, FREQ_MAX_THz],
+    "primary_censor_policy": PRIMARY_CENSOR_POLICY,
+    "random_seed": RANDOM_SEED,
+    "outer_folds": OUTER_FOLDS,
+    "inner_folds": INNER_FOLDS,
+    "alpha_grid": ALPHA_GRID.tolist(),
+    "single_kernel_scale_grid": list(SINGLE_KERNEL_SCALE_GRID),
+    "additive_kernel_scale_grid": list(ADDITIVE_KERNEL_SCALE_GRID),
+    "wasserstein_quantiles": WASSERSTEIN_QUANTILES,
+    "clr_pseudocount": CLR_PSEUDOCOUNT,
+    "n_bootstrap": N_BOOTSTRAP,
+    "n_hsic_permutations": N_HSIC_PERMUTATIONS,
+    "models": MODEL_SPECS,
+}
+(RESULTS / "run_config.json").write_text(json.dumps(config, indent=2, default=list))
+
+# ------------------------------- ARCHIVE -------------------------------
+output_zip = Path("/content/OBELiX_kernel_publication_outputs.zip")
+if output_zip.exists():
+    output_zip.unlink()
+shutil.make_archive(str(output_zip.with_suffix("")), "zip", root_dir=RESULTS)
+print(f"\nFinished. Output archive: {output_zip}")
+
+if AUTO_DOWNLOAD_ZIP:
+    try:
+        from google.colab import files
+        print('Intermediate archive:', output_zip)
+    except Exception as exc:
+        print(f"Automatic download was not started: {exc}")
+
+
+
+# ======================================================================
+# REVIEWER-RESPONSE ANALYSES
+# ======================================================================
+import copy
+import platform
+from dataclasses import replace as dataclass_replace
+from scipy.optimize import minimize
+from scipy.special import log_ndtr
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import ParameterGrid
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics.pairwise import rbf_kernel
+
+RR_ROOT = Path("/content/obelix_reviewer_response")
+RR_RESULTS = RR_ROOT / "results"
+RR_TABLES = RR_RESULTS / "tables"
+RR_FIGURES = RR_RESULTS / "figures"
+RR_PREDICTIONS = RR_RESULTS / "predictions"
+RR_SPECTRA = RR_RESULTS / "spectra"
+RR_VALIDATION = RR_RESULTS / "reference_validation"
+RR_CONVERGENCE = RR_RESULTS / "phonon_convergence"
+RR_TEMPLATES = RR_RESULTS / "reviewer_input_templates"
+for _p in [RR_ROOT, RR_RESULTS, RR_TABLES, RR_FIGURES, RR_PREDICTIONS,
+           RR_SPECTRA, RR_VALIDATION, RR_CONVERGENCE, RR_TEMPLATES]:
+    _p.mkdir(parents=True, exist_ok=True)
+
+_rr_rng = np.random.default_rng(REVIEWER_RANDOM_SEED)
+
+def _seed_from_text(text, mod=100000):
+    return REVIEWER_RANDOM_SEED + (zlib.crc32(str(text).encode("utf-8")) % mod)
+
+def save_pubfig(fig, stem):
+    """Save each publication figure as vector PDF and 600-dpi PNG."""
+    stem = Path(stem)
+    fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(stem.with_suffix(".png"), dpi=REVIEWER_FIG_DPI, bbox_inches="tight")
+    plt.close(fig)
+
+def safe_spearman(x, y):
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < 3 or np.nanstd(x[ok]) <= 0 or np.nanstd(y[ok]) <= 0:
+        return np.nan
+    return float(stats.spearmanr(x[ok], y[ok]).statistic)
+
+def bootstrap_spearman(x, y, n_boot=REVIEWER_BOOTSTRAP, seed=REVIEWER_RANDOM_SEED):
+    x = np.asarray(x, float); y = np.asarray(y, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) < 4:
+        return (np.nan, np.nan, np.nan)
+    rng = np.random.default_rng(seed)
+    vals = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, len(x), len(x))
+        v = safe_spearman(x[idx], y[idx])
+        if np.isfinite(v):
+            vals.append(v)
+    point = safe_spearman(x, y)
+    if not vals:
+        return (point, np.nan, np.nan)
+    return (point, float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5)))
+
+def metric_bundle(y, p):
+    y = np.asarray(y, float); p = np.asarray(p, float)
+    ok = np.isfinite(y) & np.isfinite(p)
+    y, p = y[ok], p[ok]
+    return {
+        "n": int(len(y)),
+        "MAE": float(mean_absolute_error(y, p)) if len(y) else np.nan,
+        "RMSE": float(np.sqrt(mean_squared_error(y, p))) if len(y) else np.nan,
+        "R2": float(r2_score(y, p)) if len(y) >= 2 and np.std(y) > 0 else np.nan,
+        "Spearman_rho": safe_spearman(y, p),
+    }
+
+def bootstrap_metric_ci(y, p, n_boot=REVIEWER_BOOTSTRAP, seed=REVIEWER_RANDOM_SEED):
+    y = np.asarray(y, float); p = np.asarray(p, float)
+    rng = np.random.default_rng(seed)
+    idxs = rng.integers(0, len(y), size=(n_boot, len(y)))
+    rows = []
+    for metric_name in ["MAE", "RMSE", "R2", "Spearman_rho"]:
+        vals = []
+        for idx in idxs:
+            yy, pp = y[idx], p[idx]
+            try:
+                vals.append(metric_bundle(yy, pp)[metric_name])
+            except Exception:
+                vals.append(np.nan)
+        vals = np.asarray(vals, float)
+        point = metric_bundle(y, p)[metric_name]
+        rows.append({
+            "metric": metric_name,
+            "point": point,
+            "ci95_low": float(np.nanpercentile(vals, 2.5)),
+            "ci95_high": float(np.nanpercentile(vals, 97.5)),
+            "n_bootstrap": n_boot,
+        })
+    return pd.DataFrame(rows)
+
+def paired_bootstrap_difference(y, p_a, p_b, model_a, model_b,
+                                n_boot=REVIEWER_BOOTSTRAP,
+                                seed=REVIEWER_RANDOM_SEED):
+    y = np.asarray(y, float); p_a = np.asarray(p_a, float); p_b = np.asarray(p_b, float)
+    rng = np.random.default_rng(seed)
+    idxs = rng.integers(0, len(y), size=(n_boot, len(y)))
+    rows = []
+    for metric_name in ["MAE", "RMSE", "R2", "Spearman_rho"]:
+        point = metric_bundle(y, p_a)[metric_name] - metric_bundle(y, p_b)[metric_name]
+        vals = []
+        for idx in idxs:
+            ma = metric_bundle(y[idx], p_a[idx])[metric_name]
+            mb = metric_bundle(y[idx], p_b[idx])[metric_name]
+            vals.append(ma - mb)
+        vals = np.asarray(vals, float)
+        rows.append({
+            "model_A": model_a,
+            "model_B": model_b,
+            "metric": metric_name,
+            "difference_A_minus_B": float(point),
+            "ci95_low": float(np.nanpercentile(vals, 2.5)),
+            "ci95_high": float(np.nanpercentile(vals, 97.5)),
+            "bootstrap_p_two_sided": float(min(1.0, 2 * min(np.nanmean(vals <= 0), np.nanmean(vals >= 0)))),
+            "better_direction": "negative" if metric_name in {"MAE", "RMSE"} else "positive",
+        })
+    return pd.DataFrame(rows)
+
+def weighted_quantile_discrete(P, centers, q):
+    P = np.asarray(P, float)
+    centers = np.asarray(centers, float)
+    out = np.full(P.shape[0], np.nan)
+    for i, row in enumerate(P):
+        row = np.clip(np.nan_to_num(row), 0, None)
+        s = row.sum()
+        if s <= 0:
+            continue
+        cdf = np.cumsum(row / s)
+        out[i] = np.interp(q, np.r_[0, cdf], np.r_[centers[0], centers])
+    return out
+
+def spectral_scalar_features(P, centers, prefix):
+    P = np.asarray(P, float)
+    centers = np.asarray(centers, float)
+    P = np.clip(np.nan_to_num(P), 0, None)
+    P = P / np.maximum(P.sum(axis=1, keepdims=True), 1e-15)
+    mean = P @ centers
+    var = np.sum(P * (centers[None, :] - mean[:, None]) ** 2, axis=1)
+    std = np.sqrt(np.maximum(var, 0))
+    skew = np.sum(P * (centers[None, :] - mean[:, None]) ** 3, axis=1) / np.maximum(std, 1e-12) ** 3
+    nz = np.where(P > 0, P, 1.0)
+    entropy = -np.sum(np.where(P > 0, P * np.log(nz), 0.0), axis=1) / np.log(P.shape[1])
+    peak = centers[np.argmax(P, axis=1)]
+    d = {
+        f"{prefix}_centroid_THz": mean,
+        f"{prefix}_std_THz": std,
+        f"{prefix}_skewness": skew,
+        f"{prefix}_spectral_entropy": entropy,
+        f"{prefix}_peak_THz": peak,
+        f"{prefix}_q05_THz": weighted_quantile_discrete(P, centers, 0.05),
+        f"{prefix}_q50_THz": weighted_quantile_discrete(P, centers, 0.50),
+        f"{prefix}_q95_THz": weighted_quantile_discrete(P, centers, 0.95),
+    }
+    d[f"{prefix}_bandwidth90_THz"] = d[f"{prefix}_q95_THz"] - d[f"{prefix}_q05_THz"]
+    for threshold in [2, 5, 10, 20]:
+        d[f"{prefix}_fraction_below_{threshold}THz"] = P[:, centers < threshold].sum(axis=1)
+    return pd.DataFrame(d)
+
+# --------------------- COHORT-LEVEL REVIEWER TABLES --------------------
+_rr_train_li = np.asarray(CTX.train_arrays["li_raw"], float)
+_rr_test_li = np.asarray(CTX.test_arrays["li_raw"], float)
+_rr_train_total = np.asarray(CTX.train_arrays["total_raw"], float)
+_rr_test_total = np.asarray(CTX.test_arrays["total_raw"], float)
+
+li_scalar_train = spectral_scalar_features(_rr_train_li, FREQ_CENTERS, "Li")
+li_scalar_test = spectral_scalar_features(_rr_test_li, FREQ_CENTERS, "Li")
+total_scalar_train = spectral_scalar_features(_rr_train_total, FREQ_CENTERS, "total")
+total_scalar_test = spectral_scalar_features(_rr_test_total, FREQ_CENTERS, "total")
+
+for df, ids in [(li_scalar_train, CTX.train_ids), (li_scalar_test, CTX.test_ids),
+                (total_scalar_train, CTX.train_ids), (total_scalar_test, CTX.test_ids)]:
+    df.index = pd.Index(ids, name="ID")
+
+def cross_spectral_features(liP, totalP, li_df, total_df):
+    out = pd.DataFrame(index=li_df.index)
+    out["Li_total_centroid_difference_THz"] = li_df["Li_centroid_THz"] - total_df["total_centroid_THz"]
+    out["Li_total_peak_difference_THz"] = li_df["Li_peak_THz"] - total_df["total_peak_THz"]
+    out["Li_total_distribution_overlap"] = np.minimum(liP, totalP).sum(axis=1)
+    for threshold in [2, 5, 10]:
+        li_f = li_df[f"Li_fraction_below_{threshold}THz"]
+        to_f = total_df[f"total_fraction_below_{threshold}THz"]
+        out[f"Li_to_total_low_frequency_ratio_{threshold}THz"] = li_f / np.maximum(to_f, 1e-8)
+    return out
+
+cross_scalar_train = cross_spectral_features(_rr_train_li, _rr_train_total, li_scalar_train, total_scalar_train)
+cross_scalar_test = cross_spectral_features(_rr_test_li, _rr_test_total, li_scalar_test, total_scalar_test)
+
+scalar_all_train = pd.concat([li_scalar_train, total_scalar_train, cross_scalar_train], axis=1)
+scalar_all_test = pd.concat([li_scalar_test, total_scalar_test, cross_scalar_test], axis=1)
+li_scalar_train.reset_index().to_csv(RR_TABLES / "train_Li_scalar_phonon_descriptors.csv", index=False)
+li_scalar_test.reset_index().to_csv(RR_TABLES / "test_Li_scalar_phonon_descriptors.csv", index=False)
+total_scalar_train.reset_index().to_csv(RR_TABLES / "train_total_scalar_phonon_descriptors.csv", index=False)
+total_scalar_test.reset_index().to_csv(RR_TABLES / "test_total_scalar_phonon_descriptors.csv", index=False)
+scalar_all_train.reset_index().to_csv(RR_TABLES / "train_all_scalar_phonon_descriptors.csv", index=False)
+scalar_all_test.reset_index().to_csv(RR_TABLES / "test_all_scalar_phonon_descriptors.csv", index=False)
+
+# Censoring counts requested by the reviewer.
+censor_rows = []
+for split_name, mm in [("train", CTX.meta_train), ("test", CTX.meta_test)]:
+    censor_rows.append({
+        "split": split_name,
+        "Family": "ALL",
+        "n": len(mm),
+        "n_upper_limits": int(mm["ic_is_upper_limit"].astype(bool).sum()),
+        "fraction_upper_limits": float(mm["ic_is_upper_limit"].astype(bool).mean()),
+    })
+    for fam, g in mm.groupby("Family", dropna=False):
+        censor_rows.append({
+            "split": split_name,
+            "Family": str(fam),
+            "n": len(g),
+            "n_upper_limits": int(g["ic_is_upper_limit"].astype(bool).sum()),
+            "fraction_upper_limits": float(g["ic_is_upper_limit"].astype(bool).mean()),
+        })
+pd.DataFrame(censor_rows).to_csv(RR_TABLES / "censoring_counts_by_split_and_family.csv", index=False)
+
+# ---------------------- SCALAR PHONON BASELINES ------------------------
+def _preprocess_fold(Xfit, Xeval):
+    imp = SimpleImputer(strategy="median")
+    scaler = StandardScaler()
+    A = scaler.fit_transform(imp.fit_transform(np.asarray(Xfit, float)))
+    B = scaler.transform(imp.transform(np.asarray(Xeval, float)))
+    return A, B
+
+def _median_euclidean(A):
+    if len(A) < 2:
+        return 1.0
+    D = np.sqrt(np.maximum(((A[:, None, :] - A[None, :, :]) ** 2).sum(axis=2), 0))
+    vals = D[np.triu_indices_from(D, k=1)]
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    return float(np.median(vals)) if len(vals) else 1.0
+
+def _fit_krr_rbf(Xfit, yfit, Xeval, alpha, scale_mult):
+    A, B = _preprocess_fold(Xfit, Xeval)
+    med = _median_euclidean(A)
+    gamma = 1.0 / (2.0 * max(scale_mult * med, 1e-12) ** 2)
+    model = KernelRidge(alpha=float(alpha), kernel="rbf", gamma=gamma)
+    model.fit(A, yfit)
+    return model.predict(B)
+
+def tune_scalar_krr(X, y, groups, indices, seed):
+    indices = np.asarray(indices, int)
+    splits = make_group_splits(indices, groups, REVIEWER_INNER_FOLDS, seed)
+    records, best = [], None
+    for scale_mult in SINGLE_KERNEL_SCALE_GRID:
+        for alpha in ALPHA_GRID:
+            fold_vals = []
+            for tr, va in splits:
+                pred = _fit_krr_rbf(X[tr], y[tr], X[va], alpha, scale_mult)
+                fold_vals.append(mean_absolute_error(y[va], pred))
+            row = {
+                "scale_mult": float(scale_mult),
+                "alpha": float(alpha),
+                "cv_MAE": float(np.mean(fold_vals)),
+                "cv_MAE_sd": float(np.std(fold_vals, ddof=1)) if len(fold_vals) > 1 else 0.0,
+            }
+            records.append(row)
+            key = (row["cv_MAE"], row["cv_MAE_sd"], -row["alpha"])
+            if best is None or key < best[0]:
+                best = (key, row)
+    return best[1], pd.DataFrame(records)
+
+def run_scalar_nested(name, Xtr, Xte):
+    Xtr = np.asarray(Xtr, float); Xte = np.asarray(Xte, float)
+    n = len(CTX.y_train)
+    all_idx = np.arange(n)
+    outer = make_group_splits(all_idx, CTX.groups_train, REVIEWER_OUTER_FOLDS, REVIEWER_RANDOM_SEED + 71)
+    oof = np.full(n, np.nan)
+    outer_rows, searches = [], []
+    for fold, (tr, va) in enumerate(outer, 1):
+        best, search = tune_scalar_krr(Xtr, CTX.y_train, CTX.groups_train, tr,
+                                       REVIEWER_RANDOM_SEED + 1000 * fold)
+        oof[va] = _fit_krr_rbf(Xtr[tr], CTX.y_train[tr], Xtr[va],
+                               best["alpha"], best["scale_mult"])
+        outer_rows.append({"model": name, "outer_fold": fold, **best,
+                           **metric_bundle(CTX.y_train[va], oof[va])})
+        search["model"] = name
+        search["scope"] = f"outer_fold_{fold}"
+        searches.append(search)
+    best_full, search_full = tune_scalar_krr(Xtr, CTX.y_train, CTX.groups_train,
+                                             all_idx, REVIEWER_RANDOM_SEED + 999)
+    test_pred = _fit_krr_rbf(Xtr, CTX.y_train, Xte,
+                             best_full["alpha"], best_full["scale_mult"])
+    search_full["model"] = name
+    search_full["scope"] = "full_train"
+    searches.append(search_full)
+    return {
+        "name": name,
+        "oof_pred": oof,
+        "test_pred": test_pred,
+        "oof_metrics": metric_bundle(CTX.y_train, oof),
+        "test_metrics": metric_bundle(CTX.y_test, test_pred),
+        "best_full": best_full,
+        "outer": pd.DataFrame(outer_rows),
+        "search": pd.concat(searches, ignore_index=True),
+    }
+
+scalar_model_results = {}
+if RUN_REVIEWER_SCALAR_BASELINES:
+    _static_tr = np.asarray(CTX.train_arrays["static"], float)
+    _static_te = np.asarray(CTX.test_arrays["static"], float)
+    scalar_specs = {
+        "Li_scalar_RBF": (li_scalar_train.to_numpy(float), li_scalar_test.to_numpy(float)),
+        "total_scalar_RBF": (total_scalar_train.to_numpy(float), total_scalar_test.to_numpy(float)),
+        "all_scalar_RBF": (scalar_all_train.to_numpy(float), scalar_all_test.to_numpy(float)),
+        "static_plus_Li_scalar_RBF": (
+            np.c_[_static_tr, li_scalar_train.to_numpy(float)],
+            np.c_[_static_te, li_scalar_test.to_numpy(float)]
+        ),
+        "static_plus_all_scalar_RBF": (
+            np.c_[_static_tr, scalar_all_train.to_numpy(float)],
+            np.c_[_static_te, scalar_all_test.to_numpy(float)]
+        ),
+    }
+    _outer_all, _search_all, _pred_rows, _perf_rows, _boot_rows, _pair_rows = [], [], [], [], [], []
+    for name, (Xtr, Xte) in scalar_specs.items():
+        print(f"\nReviewer scalar baseline: {name}")
+        res = run_scalar_nested(name, Xtr, Xte)
+        scalar_model_results[name] = res
+        _outer_all.append(res["outer"])
+        _search_all.append(res["search"])
+        for oid, y, p, fam in zip(CTX.train_ids, CTX.y_train, res["oof_pred"], CTX.family_train):
+            _pred_rows.append({"ID": oid, "split": "train_OOF", "Family": fam,
+                               "model": name, "observed": y, "predicted": p})
+        for oid, y, p, fam in zip(CTX.test_ids, CTX.y_test, res["test_pred"], CTX.family_test):
+            _pred_rows.append({"ID": oid, "split": "official_test", "Family": fam,
+                               "model": name, "observed": y, "predicted": p})
+        _perf_rows.append({"model": name, "evaluation": "nested_train_OOF", **res["oof_metrics"]})
+        _perf_rows.append({"model": name, "evaluation": "official_test", **res["test_metrics"]})
+        bdf = bootstrap_metric_ci(CTX.y_test, res["test_pred"],
+                                  seed=_seed_from_text(name, 10000))
+        bdf["model"] = name
+        _boot_rows.append(bdf)
+        for ref_name in ["li_wasserstein", "static_plus_li_wasserstein"]:
+            _pair_rows.append(paired_bootstrap_difference(
+                CTX.y_test, res["test_pred"], model_results[ref_name]["test_pred"],
+                name, ref_name,
+                seed=_seed_from_text(name + ref_name, 10000)
+            ))
+    pd.concat(_outer_all, ignore_index=True).to_csv(RR_TABLES / "scalar_baseline_nested_outer_folds.csv", index=False)
+    pd.concat(_search_all, ignore_index=True).to_csv(RR_TABLES / "scalar_baseline_hyperparameter_search.csv", index=False)
+    pd.DataFrame(_pred_rows).to_csv(RR_PREDICTIONS / "scalar_baseline_predictions.csv", index=False)
+    pd.DataFrame(_perf_rows).to_csv(RR_TABLES / "scalar_baseline_performance.csv", index=False)
+    scalar_boot_df = pd.concat(_boot_rows, ignore_index=True)
+    scalar_boot_df.to_csv(RR_TABLES / "scalar_baseline_test_bootstrap_intervals.csv", index=False)
+    pd.concat(_pair_rows, ignore_index=True).to_csv(
+        RR_TABLES / "scalar_vs_full_distribution_paired_bootstrap.csv", index=False)
+
+    # Add primary full-distribution models to the plotting table.
+    plot_rows = [scalar_boot_df]
+    for ref_name in ["static_rbf", "li_wasserstein", "static_plus_li_wasserstein"]:
+        bdf = bootstrap_metric_ci(CTX.y_test, model_results[ref_name]["test_pred"],
+                                  seed=_seed_from_text(ref_name, 10000))
+        bdf["model"] = ref_name
+        plot_rows.append(bdf)
+    plot_df = pd.concat(plot_rows, ignore_index=True)
+    r2p = plot_df[plot_df["metric"] == "R2"].sort_values("point")
+    fig, ax = plt.subplots(figsize=(8.6, max(4.8, 0.45 * len(r2p))))
+    ypos = np.arange(len(r2p))
+    xerr = np.vstack([r2p["point"] - r2p["ci95_low"], r2p["ci95_high"] - r2p["point"]])
+    ax.errorbar(r2p["point"], ypos, xerr=xerr, fmt="o", capsize=3)
+    ax.axvline(0, linestyle="--", linewidth=1)
+    ax.set_yticks(ypos)
+    ax.set_yticklabels(r2p["model"])
+    ax.set_xlabel("Official-test $R^2$ (95% paired-bootstrap interval)")
+    ax.set_title("Scalar phonon baselines versus full-distribution kernels")
+    fig.tight_layout()
+    save_pubfig(fig, RR_FIGURES / "scalar_vs_distribution_test_R2")
+
+# ---------------------- FREQUENCY-WARP SENSITIVITY ---------------------
+def _warp_identity(x): return np.asarray(x, float)
+def _warp_scale(x, a): return a * np.asarray(x, float)
+def _warp_power(x, p, anchor=5.0):
+    x = np.maximum(np.asarray(x, float), 0)
+    return anchor * (x / anchor) ** p
+def _warp_lowfreq(x, a, scale=10.0):
+    x = np.asarray(x, float)
+    return x * (1.0 + a * np.exp(-(x / scale) ** 2))
+
+warp_specs = [("identity", "identity", 1.0, _warp_identity)]
+for a in [0.85, 0.90, 0.95, 1.05, 1.10, 1.15]:
+    warp_specs.append((f"global_scale_{a:.2f}", "global_scale", a, lambda x, a=a: _warp_scale(x, a)))
+for p in [0.90, 0.95, 1.05, 1.10]:
+    warp_specs.append((f"power_{p:.2f}", "power", p, lambda x, p=p: _warp_power(x, p)))
+for a in [-0.10, -0.05, 0.05, 0.10]:
+    warp_specs.append((f"lowfreq_warp_{a:+.2f}", "lowfreq_warp", a, lambda x, a=a: _warp_lowfreq(x, a)))
+
+if RUN_REVIEWER_FREQUENCY_WARP:
+    warp_rows, warp_pred_rows = [], []
+    base_pred = model_results["li_wasserstein"]["test_pred"]
+    all_train_idx = np.arange(len(CTX.y_train))
+    all_test_idx = np.arange(len(CTX.y_test))
+    for label, family, parameter, func in warp_specs:
+        print(f"Frequency-warp sensitivity: {label}")
+        ctx_w = copy.copy(CTX)
+        ctx_w.train_arrays = dict(CTX.train_arrays)
+        ctx_w.test_arrays = dict(CTX.test_arrays)
+        ctx_w.train_arrays["li_w2"] = func(np.asarray(CTX.train_arrays["li_w2"], float))
+        ctx_w.test_arrays["li_w2"] = func(np.asarray(CTX.test_arrays["li_w2"], float))
+        eng_w = KernelEngine(ctx_w)
+        spec = MODEL_SPECS["li_wasserstein"]
+        best, search = tune_model(ctx_w, eng_w, spec, all_train_idx,
+                                  _seed_from_text(label, 100000))
+        pred = predict_with_params(ctx_w, eng_w, spec, all_train_idx, all_test_idx,
+                                   "test", best)
+        centers_w = func(FREQ_CENTERS)
+        f5_tr = _rr_train_li[:, centers_w < 5].sum(axis=1)
+        f5_te = _rr_test_li[:, centers_w < 5].sum(axis=1)
+        q5_tr = func(li_scalar_train["Li_q05_THz"].to_numpy(float))
+        q5_te = func(li_scalar_test["Li_q05_THz"].to_numpy(float))
+        row = {
+            "warp": label,
+            "warp_family": family,
+            "parameter": parameter,
+            **best,
+            **metric_bundle(CTX.y_test, pred),
+            "train_rho_fraction_below_5THz": safe_spearman(f5_tr, CTX.y_train),
+            "test_rho_fraction_below_5THz": safe_spearman(f5_te, CTX.y_test),
+            "train_rho_q05": safe_spearman(q5_tr, CTX.y_train),
+            "test_rho_q05": safe_spearman(q5_te, CTX.y_test),
+            "max_abs_prediction_change_vs_unwarped": float(np.max(np.abs(pred - base_pred))),
+            "mean_abs_prediction_change_vs_unwarped": float(np.mean(np.abs(pred - base_pred))),
+        }
+        warp_rows.append(row)
+        for oid, yy, pp in zip(CTX.test_ids, CTX.y_test, pred):
+            warp_pred_rows.append({"ID": oid, "warp": label, "observed": yy, "predicted": pp})
+    warp_df = pd.DataFrame(warp_rows)
+    warp_df.to_csv(RR_TABLES / "frequency_warp_sensitivity.csv", index=False)
+    pd.DataFrame(warp_pred_rows).to_csv(RR_PREDICTIONS / "frequency_warp_test_predictions.csv", index=False)
+
+    for metric_name in ["R2", "Spearman_rho", "test_rho_fraction_below_5THz"]:
+        fig, ax = plt.subplots(figsize=(10.0, 5.2))
+        d = warp_df.copy()
+        ax.plot(np.arange(len(d)), d[metric_name], marker="o")
+        ax.set_xticks(np.arange(len(d)))
+        ax.set_xticklabels(d["warp"], rotation=70, ha="right")
+        ax.set_ylabel(metric_name.replace("_", " "))
+        ax.set_title("Sensitivity to systematic frequency scaling and monotonic warping")
+        fig.tight_layout()
+        save_pubfig(fig, RR_FIGURES / f"frequency_warp_{metric_name}")
+
+# ------------------ IMAGINARY-MODE / STABILITY SENSITIVITY -------------
+def _context_subset(ctx, keep_train, keep_test):
+    keep_train = np.asarray(keep_train, bool)
+    keep_test = np.asarray(keep_test, bool)
+    mt = ctx.meta_train.iloc[np.where(keep_train)[0]].copy()
+    me = ctx.meta_test.iloc[np.where(keep_test)[0]].copy()
+    tr_arrays = {k: np.asarray(v)[keep_train] for k, v in ctx.train_arrays.items()}
+    te_arrays = {k: np.asarray(v)[keep_test] for k, v in ctx.test_arrays.items()}
+    return KernelContext(
+        policy=ctx.policy,
+        train_ids=np.asarray(ctx.train_ids)[keep_train],
+        test_ids=np.asarray(ctx.test_ids)[keep_test],
+        y_train=np.asarray(ctx.y_train)[keep_train],
+        y_test=np.asarray(ctx.y_test)[keep_test],
+        groups_train=leakage_groups(mt),
+        family_train=mt["Family"].to_numpy(str),
+        family_test=me["Family"].to_numpy(str),
+        meta_train=mt,
+        meta_test=me,
+        train_arrays=tr_arrays,
+        test_arrays=te_arrays,
+    )
+
+if RUN_REVIEWER_STABILITY_SENSITIVITY:
+    qc_pdos = qc_all[(qc_all["mode"] == "pdos") & (qc_all["status"] == "ok")].copy()
+    qc_pdos["imaginary_area_fraction"] = (
+        pd.to_numeric(qc_pdos["negative_frequency_area_diagnostic"], errors="coerce").clip(lower=0)
+        / (
+            pd.to_numeric(qc_pdos["negative_frequency_area_diagnostic"], errors="coerce").clip(lower=0)
+            + pd.to_numeric(qc_pdos["positive_area_0_to_100_THz"], errors="coerce").clip(lower=0)
+            + 1e-15
+        )
+    )
+    qc_pdos = qc_pdos.sort_values("file").drop_duplicates(["split", "ID"], keep="last")
+    qc_pdos.to_csv(RR_TABLES / "Li_PDOS_imaginary_mode_QC.csv", index=False)
+    qc_lookup = qc_pdos.set_index(["split", "ID"])
+
+    def get_qc(split, ids, col):
+        vals = []
+        for oid in ids:
+            try:
+                vals.append(float(qc_lookup.loc[(split, oid), col]))
+            except Exception:
+                vals.append(np.nan)
+        return np.asarray(vals, float)
+
+    tr_imag = get_qc("train", CTX.train_ids, "imaginary_area_fraction")
+    te_imag = get_qc("test", CTX.test_ids, "imaginary_area_fraction")
+    tr_minf = get_qc("train", CTX.train_ids, "min_frequency_raw_THz")
+    te_minf = get_qc("test", CTX.test_ids, "min_frequency_raw_THz")
+
+    stability_rules = [
+        ("all", np.ones(len(CTX.y_train), bool), np.ones(len(CTX.y_test), bool)),
+        ("imag_fraction_le_0.05", tr_imag <= 0.05, te_imag <= 0.05),
+        ("imag_fraction_le_0.02", tr_imag <= 0.02, te_imag <= 0.02),
+        ("imag_fraction_le_0.01", tr_imag <= 0.01, te_imag <= 0.01),
+        ("imag_fraction_le_0.005", tr_imag <= 0.005, te_imag <= 0.005),
+        ("min_frequency_ge_minus_2THz", tr_minf >= -2.0, te_minf >= -2.0),
+        ("min_frequency_ge_minus_1THz", tr_minf >= -1.0, te_minf >= -1.0),
+        ("combined_imag_1pct_and_min_minus1",
+         (tr_imag <= 0.01) & (tr_minf >= -1.0),
+         (te_imag <= 0.01) & (te_minf >= -1.0)),
+    ]
+    stability_rows, stability_preds = [], []
+    f5_tr_all = li_scalar_train["Li_fraction_below_5THz"].to_numpy(float)
+    f5_te_all = li_scalar_test["Li_fraction_below_5THz"].to_numpy(float)
+    for label, ktr, kte in stability_rules:
+        ktr = np.asarray(ktr, bool) & np.isfinite(tr_imag) & np.isfinite(tr_minf)
+        kte = np.asarray(kte, bool) & np.isfinite(te_imag) & np.isfinite(te_minf)
+        if ktr.sum() < 30 or kte.sum() < 8:
+            stability_rows.append({"rule": label, "n_train": int(ktr.sum()),
+                                   "n_test": int(kte.sum()), "status": "too_few"})
+            continue
+        cctx = _context_subset(CTX, ktr, kte)
+        ceng = KernelEngine(cctx)
+        all_idx = np.arange(len(cctx.y_train))
+        test_idx = np.arange(len(cctx.y_test))
+        best, _ = tune_model(cctx, ceng, MODEL_SPECS["li_wasserstein"],
+                             all_idx, _seed_from_text(label, 100000))
+        pred = predict_with_params(cctx, ceng, MODEL_SPECS["li_wasserstein"],
+                                   all_idx, test_idx, "test", best)
+        stability_rows.append({
+            "rule": label,
+            "status": "ok",
+            "n_train": int(ktr.sum()), "n_test": int(kte.sum()),
+            "train_rho_Li_fraction_below_5THz": safe_spearman(f5_tr_all[ktr], CTX.y_train[ktr]),
+            "test_rho_Li_fraction_below_5THz": safe_spearman(f5_te_all[kte], CTX.y_test[kte]),
+            **best, **metric_bundle(cctx.y_test, pred)
+        })
+        for oid, yy, pp in zip(cctx.test_ids, cctx.y_test, pred):
+            stability_preds.append({"ID": oid, "rule": label, "observed": yy, "predicted": pp})
+    stability_df = pd.DataFrame(stability_rows)
+    stability_df.to_csv(RR_TABLES / "imaginary_mode_exclusion_sensitivity.csv", index=False)
+    pd.DataFrame(stability_preds).to_csv(RR_PREDICTIONS / "imaginary_mode_sensitivity_predictions.csv", index=False)
+
+    d = stability_df[stability_df["status"] == "ok"].copy()
+    if len(d):
+        fig, ax = plt.subplots(figsize=(9.5, 5.1))
+        ax.plot(np.arange(len(d)), d["test_rho_Li_fraction_below_5THz"], marker="o",
+                label=r"$\rho[F_{\mathrm{Li}}(<5\,\mathrm{THz}),\log\sigma]$")
+        ax.plot(np.arange(len(d)), d["R2"], marker="s", label="Li-Wasserstein test $R^2$")
+        ax.set_xticks(np.arange(len(d)))
+        ax.set_xticklabels(d["rule"], rotation=65, ha="right")
+        ax.set_ylabel("Association or predictive metric")
+        ax.legend()
+        ax.set_title("Sensitivity to imaginary-mode exclusion criteria")
+        fig.tight_layout()
+        save_pubfig(fig, RR_FIGURES / "imaginary_mode_sensitivity")
+
+    # Direct confounding checks.
+    conf_rows = []
+    for split, imag, minf, f5, y, fam in [
+        ("train", tr_imag, tr_minf, f5_tr_all, CTX.y_train, CTX.family_train),
+        ("test", te_imag, te_minf, f5_te_all, CTX.y_test, CTX.family_test),
+    ]:
+        for xname, x in [("imaginary_area_fraction", imag), ("minimum_frequency_THz", minf)]:
+            conf_rows.append({"split": split, "x": xname, "y": "log10_conductivity",
+                              "spearman_rho": safe_spearman(x, y)})
+            conf_rows.append({"split": split, "x": xname, "y": "Li_fraction_below_5THz",
+                              "spearman_rho": safe_spearman(x, f5)})
+    pd.DataFrame(conf_rows).to_csv(RR_TABLES / "imaginary_mode_confounding_checks.csv", index=False)
+
+# -------------------- FORMAL CENSORED KERNEL REGRESSION ----------------
+def _center_kernel_numpy(Kfit, Keval):
+    Kfit = np.asarray(Kfit, float)
+    Keval = np.asarray(Keval, float)
+    col_mean = Kfit.mean(axis=0, keepdims=True)
+    row_mean = Kfit.mean(axis=1, keepdims=True)
+    grand = Kfit.mean()
+    Kc = Kfit - row_mean - col_mean + grand
+    Kxc = Keval - Keval.mean(axis=1, keepdims=True) - col_mean + grand
+    return Kc, Kxc
+
+def kernel_pca_features(Kfit, Keval, rank):
+    Kc, Kxc = _center_kernel_numpy(Kfit, Keval)
+    vals, vecs = np.linalg.eigh((Kc + Kc.T) / 2)
+    order = np.argsort(vals)[::-1]
+    vals, vecs = vals[order], vecs[:, order]
+    keep = (vals > 1e-10)
+    vals, vecs = vals[keep], vecs[:, keep]
+    r = min(int(rank), len(vals))
+    vals, vecs = vals[:r], vecs[:, :r]
+    Zfit = vecs * np.sqrt(vals)[None, :]
+    Zeval = (Kxc @ vecs) / np.sqrt(vals)[None, :]
+    return Zfit, Zeval
+
+def fit_upper_tobit_features(Z, limits, censored, penalty, maxiter=1000):
+    Z = np.asarray(Z, float)
+    limits = np.asarray(limits, float)
+    censored = np.asarray(censored, bool)
+    exact = ~censored
+    n, p = Z.shape
+    if exact.sum() < max(5, p // 5):
+        raise ValueError("Too few exact observations for censored regression.")
+    beta0 = np.linalg.lstsq(np.c_[np.ones(exact.sum()), Z[exact]], limits[exact], rcond=None)[0]
+    resid0 = limits[exact] - (beta0[0] + Z[exact] @ beta0[1:])
+    sigma0 = max(float(np.std(resid0)), 0.2)
+    x0 = np.r_[beta0[0], beta0[1:], np.log(sigma0)]
+
+    def objective(theta):
+        intercept = theta[0]
+        beta = theta[1:-1]
+        log_sigma = theta[-1]
+        sigma = np.exp(log_sigma)
+        mu = intercept + Z @ beta
+        z_exact = (limits[exact] - mu[exact]) / sigma
+        nll_exact = 0.5 * np.sum(z_exact ** 2) + exact.sum() * (log_sigma + 0.5 * np.log(2 * np.pi))
+        z_cens = (limits[censored] - mu[censored]) / sigma
+        nll_cens = -np.sum(log_ndtr(z_cens))
+        reg = 0.5 * float(penalty) * np.sum(beta ** 2)
+        return float(nll_exact + nll_cens + reg)
+
+    result = minimize(objective, x0, method="L-BFGS-B",
+                      bounds=[(None, None)] * (len(x0) - 1) + [(-5.0, 5.0)],
+                      options={"maxiter": maxiter, "ftol": 1e-9})
+    theta = result.x
+    return {
+        "intercept": float(theta[0]),
+        "beta": theta[1:-1].copy(),
+        "sigma": float(np.exp(theta[-1])),
+        "success": bool(result.success),
+        "message": str(result.message),
+        "objective": float(result.fun),
+    }
+
+def predict_tobit_features(model, Z):
+    return model["intercept"] + np.asarray(Z, float) @ model["beta"]
+
+def interval_aware_mae(limits, censored, pred):
+    limits = np.asarray(limits, float); censored = np.asarray(censored, bool); pred = np.asarray(pred, float)
+    err = np.where(censored, np.maximum(pred - limits, 0.0), np.abs(pred - limits))
+    return float(np.mean(err))
+
+def exact_only_metrics(limits, censored, pred):
+    exact = ~np.asarray(censored, bool)
+    return metric_bundle(np.asarray(limits)[exact], np.asarray(pred)[exact])
+
+def get_model_kernel_numpy(context, engine, model_name, fit_idx, eval_idx, eval_split, params=None):
+    spec = MODEL_SPECS[model_name]
+    if params is None:
+        params = model_results[model_name]["best_full"]
+    Ktr, Kx = engine.combined_kernel(spec, fit_idx, eval_idx, eval_split,
+                                     params["scale_mult"], params["weights"])
+    return Ktr.detach().cpu().numpy(), Kx.detach().cpu().numpy()
+
+def tune_tobit_on_kernel(K, limits, censored, groups, seed):
+    n = len(limits)
+    idx = np.arange(n)
+    splits = make_group_splits(idx, groups, REVIEWER_INNER_FOLDS, seed)
+    penalties = np.logspace(-4, 2, 7)
+    ranks = [10, 20, 40]
+    rows, best = [], None
+    for rank in ranks:
+        for penalty in penalties:
+            vals = []
+            successes = []
+            for tr, va in splits:
+                Ztr, Zva = kernel_pca_features(K[np.ix_(tr, tr)], K[np.ix_(va, tr)], rank)
+                try:
+                    mod = fit_upper_tobit_features(Ztr, limits[tr], censored[tr], penalty)
+                    pred = predict_tobit_features(mod, Zva)
+                    vals.append(interval_aware_mae(limits[va], censored[va], pred))
+                    successes.append(mod["success"])
+                except Exception:
+                    vals.append(np.inf)
+                    successes.append(False)
+            row = {
+                "rank": rank, "penalty": float(penalty),
+                "cv_interval_MAE": float(np.mean(vals)),
+                "successful_folds": int(np.sum(successes)),
+            }
+            rows.append(row)
+            key = (row["cv_interval_MAE"], -row["successful_folds"], rank)
+            if np.isfinite(row["cv_interval_MAE"]) and (best is None or key < best[0]):
+                best = (key, row)
+    if best is None:
+        raise RuntimeError("No successful censored-kernel fit.")
+    return best[1], pd.DataFrame(rows)
+
+if RUN_REVIEWER_TOBIT_KERNEL:
+    tobit_models = ["static_rbf", "li_wasserstein", "static_plus_li_wasserstein"]
+    tobit_perf_rows, tobit_pred_rows, tobit_search_rows = [], [], []
+    train_limits = CTX.meta_train["log10_ic_limit"].to_numpy(float)
+    test_limits = CTX.meta_test["log10_ic_limit"].to_numpy(float)
+    train_cens = CTX.meta_train["ic_is_upper_limit"].astype(bool).to_numpy()
+    test_cens = CTX.meta_test["ic_is_upper_limit"].astype(bool).to_numpy()
+    all_idx = np.arange(len(CTX.y_train))
+    test_idx = np.arange(len(CTX.y_test))
+    for name in tobit_models:
+        print(f"Censored kernel regression: {name}")
+        Ktr, Kte = get_model_kernel_numpy(CTX, ENGINE, name, all_idx, test_idx, "test")
+        best, search = tune_tobit_on_kernel(Ktr, train_limits, train_cens,
+                                            CTX.groups_train,
+                                            _seed_from_text(name, 10000))
+        Ztr, Zte = kernel_pca_features(Ktr, Kte, best["rank"])
+        mod = fit_upper_tobit_features(Ztr, train_limits, train_cens, best["penalty"])
+        pred = predict_tobit_features(mod, Zte)
+        exact_m = exact_only_metrics(test_limits, test_cens, pred)
+        row = {
+            "model": name,
+            "rank": best["rank"],
+            "penalty": best["penalty"],
+            "cv_interval_MAE": best["cv_interval_MAE"],
+            "fit_success": mod["success"],
+            "fit_sigma": mod["sigma"],
+            "official_test_interval_aware_MAE": interval_aware_mae(test_limits, test_cens, pred),
+            **{f"official_test_exact_{k}": v for k, v in exact_m.items()},
+        }
+        tobit_perf_rows.append(row)
+        search["model"] = name
+        tobit_search_rows.append(search)
+        for oid, lim, cens, pp, fam in zip(CTX.test_ids, test_limits, test_cens, pred, CTX.family_test):
+            tobit_pred_rows.append({
+                "ID": oid, "Family": fam, "model": name,
+                "reported_log10_limit_or_value": lim,
+                "is_upper_limit": bool(cens),
+                "predicted_latent_log10_conductivity": pp,
+                "interval_violation": max(pp - lim, 0.0) if cens else np.nan,
+                "absolute_error_if_exact": abs(pp - lim) if not cens else np.nan,
+            })
+    pd.DataFrame(tobit_perf_rows).to_csv(RR_TABLES / "formal_censored_kernel_regression_performance.csv", index=False)
+    pd.DataFrame(tobit_pred_rows).to_csv(RR_PREDICTIONS / "formal_censored_kernel_predictions.csv", index=False)
+    pd.concat(tobit_search_rows, ignore_index=True).to_csv(
+        RR_TABLES / "formal_censored_kernel_hyperparameter_search.csv", index=False)
+
+# ---------------------- FUSION / STACKING ABLATIONS --------------------
+def tune_fused_independent_scales(context, engine, weight_grid, scale_grid):
+    idx = np.arange(len(context.y_train))
+    splits = make_group_splits(idx, context.groups_train, REVIEWER_INNER_FOLDS,
+                               REVIEWER_RANDOM_SEED + 223)
+    rows, best = [], None
+    for s_static in scale_grid:
+        for s_li in scale_grid:
+            for w_li in weight_grid:
+                fold_mae = np.zeros((len(splits), len(ALPHA_GRID)), float)
+                for f, (tr, va) in enumerate(splits):
+                    Ks_tr, Ks_va = engine.component_kernel("static_rbf", tr, va, "train", s_static)
+                    Kl_tr, Kl_va = engine.component_kernel("li_wasserstein", tr, va, "train", s_li)
+                    Ktr = (1 - w_li) * Ks_tr + w_li * Kl_tr
+                    Kva = (1 - w_li) * Ks_va + w_li * Kl_va
+                    pred = eig_predictions(Ktr, Kva, context.y_train[tr], ALPHA_GRID)
+                    fold_mae[f] = np.mean(np.abs(context.y_train[va, None] - pred), axis=0)
+                mean_mae = fold_mae.mean(axis=0)
+                for ai, alpha in enumerate(ALPHA_GRID):
+                    row = {
+                        "static_scale_mult": float(s_static),
+                        "Li_scale_mult": float(s_li),
+                        "Li_weight": float(w_li),
+                        "static_weight": float(1 - w_li),
+                        "alpha": float(alpha),
+                        "cv_MAE": float(mean_mae[ai]),
+                    }
+                    rows.append(row)
+                    key = (row["cv_MAE"], -row["alpha"])
+                    if best is None or key < best[0]:
+                        best = (key, row)
+    return best[1], pd.DataFrame(rows)
+
+def predict_fused_independent_scales(context, engine, params):
+    tr = np.arange(len(context.y_train))
+    te = np.arange(len(context.y_test))
+    Ks_tr, Ks_te = engine.component_kernel("static_rbf", tr, te, "test",
+                                            params["static_scale_mult"])
+    Kl_tr, Kl_te = engine.component_kernel("li_wasserstein", tr, te, "test",
+                                            params["Li_scale_mult"])
+    w = params["Li_weight"]
+    Ktr = (1 - w) * Ks_tr + w * Kl_tr
+    Kte = (1 - w) * Ks_te + w * Kl_te
+    return eig_predictions(Ktr, Kte, context.y_train, [params["alpha"]])[:, 0]
+
+if RUN_REVIEWER_FUSION_ABLATIONS:
+    fusion_rows, fusion_pred_rows = [], []
+    # OOF-trained simplex late fusion. Median offset minimizes absolute error.
+    static_oof = model_results["static_rbf"]["oof_pred"]
+    li_oof = model_results["li_wasserstein"]["oof_pred"]
+    static_test = model_results["static_rbf"]["test_pred"]
+    li_test = model_results["li_wasserstein"]["test_pred"]
+    stack_candidates = []
+    for w_li in np.linspace(0, 1, 101):
+        blend = (1 - w_li) * static_oof + w_li * li_oof
+        intercept = float(np.median(CTX.y_train - blend))
+        mae = mean_absolute_error(CTX.y_train, blend + intercept)
+        stack_candidates.append((mae, w_li, intercept))
+    _, w_li, intercept = min(stack_candidates, key=lambda z: z[0])
+    stack_test = (1 - w_li) * static_test + w_li * li_test + intercept
+    fusion_rows.append({
+        "model": "late_fusion_simplex_stack",
+        "Li_weight": w_li, "static_weight": 1 - w_li,
+        "intercept": intercept,
+        "train_OOF_MAE_used_for_selection": min(x[0] for x in stack_candidates),
+        **metric_bundle(CTX.y_test, stack_test),
+    })
+    for oid, yy, pp in zip(CTX.test_ids, CTX.y_test, stack_test):
+        fusion_pred_rows.append({"ID": oid, "model": "late_fusion_simplex_stack",
+                                 "observed": yy, "predicted": pp})
+
+    # Fine early fusion with separately selected component bandwidths.
+    fine_best, fine_search = tune_fused_independent_scales(
+        CTX, ENGINE, np.linspace(0, 1, 21), (0.5, 1.0, 2.0))
+    fine_pred = predict_fused_independent_scales(CTX, ENGINE, fine_best)
+    fusion_rows.append({"model": "early_fusion_fine_independent_bandwidths",
+                        **fine_best, **metric_bundle(CTX.y_test, fine_pred)})
+    for oid, yy, pp in zip(CTX.test_ids, CTX.y_test, fine_pred):
+        fusion_pred_rows.append({"ID": oid, "model": "early_fusion_fine_independent_bandwidths",
+                                 "observed": yy, "predicted": pp})
+    fine_search.to_csv(RR_TABLES / "fine_fusion_hyperparameter_search.csv", index=False)
+
+    # Existing fused model, included explicitly for comparison.
+    current_pred = model_results["static_plus_li_wasserstein"]["test_pred"]
+    fusion_rows.append({
+        "model": "published_additive_kernel",
+        **model_results["static_plus_li_wasserstein"]["best_full"],
+        **metric_bundle(CTX.y_test, current_pred),
+    })
+    for oid, yy, pp in zip(CTX.test_ids, CTX.y_test, current_pred):
+        fusion_pred_rows.append({"ID": oid, "model": "published_additive_kernel",
+                                 "observed": yy, "predicted": pp})
+
+    # Standalone Li model, because it currently has the highest official-test R2.
+    fusion_rows.append({
+        "model": "standalone_Li_Wasserstein",
+        **model_results["li_wasserstein"]["best_full"],
+        **metric_bundle(CTX.y_test, li_test),
+    })
+    pd.DataFrame(fusion_rows).to_csv(RR_TABLES / "fusion_and_stacking_ablation_performance.csv", index=False)
+    pd.DataFrame(fusion_pred_rows).to_csv(RR_PREDICTIONS / "fusion_and_stacking_predictions.csv", index=False)
+    pair_fusion = []
+    for name, pred in [
+        ("late_fusion_simplex_stack", stack_test),
+        ("early_fusion_fine_independent_bandwidths", fine_pred),
+        ("published_additive_kernel", current_pred),
+    ]:
+        pair_fusion.append(paired_bootstrap_difference(
+            CTX.y_test, pred, li_test, name, "standalone_Li_Wasserstein",
+            seed=_seed_from_text(name, 10000)))
+    pd.concat(pair_fusion, ignore_index=True).to_csv(
+        RR_TABLES / "fusion_vs_Li_only_paired_bootstrap.csv", index=False)
+
+    d = pd.DataFrame(fusion_rows).sort_values("R2")
+    fig, ax = plt.subplots(figsize=(8.7, 4.8))
+    ax.barh(d["model"], d["R2"])
+    ax.axvline(0, linestyle="--", linewidth=1)
+    ax.set_xlabel("Official-test $R^2$")
+    ax.set_title("Early fusion, late fusion, and standalone Li-PDOS")
+    fig.tight_layout()
+    save_pubfig(fig, RR_FIGURES / "fusion_ablation_test_R2")
+
+# ----------------------- WITHIN-FAMILY ANALYSES ------------------------
+if RUN_REVIEWER_FAMILY_ANALYSES:
+    f5_tr = li_scalar_train["Li_fraction_below_5THz"].to_numpy(float)
+    f5_te = li_scalar_test["Li_fraction_below_5THz"].to_numpy(float)
+    q5_tr = li_scalar_train["Li_q05_THz"].to_numpy(float)
+    q5_te = li_scalar_test["Li_q05_THz"].to_numpy(float)
+
+    family_assoc_rows = []
+    for split, ids, fams, y, f5, q5 in [
+        ("train", CTX.train_ids, CTX.family_train, CTX.y_train, f5_tr, q5_tr),
+        ("test", CTX.test_ids, CTX.family_test, CTX.y_test, f5_te, q5_te),
+    ]:
+        for fam in sorted(set(fams)):
+            mask = np.asarray(fams) == fam
+            if mask.sum() < REVIEWER_MIN_FAMILY_N:
+                continue
+            for descriptor, x in [("Li_fraction_below_5THz", f5),
+                                  ("Li_q05_THz", q5)]:
+                point, lo, hi = bootstrap_spearman(
+                    x[mask], y[mask],
+                    seed=_seed_from_text(split + fam + descriptor, 10000))
+                family_assoc_rows.append({
+                    "split": split, "Family": fam, "descriptor": descriptor,
+                    "n": int(mask.sum()), "conductivity_range_log10": float(np.ptp(y[mask])),
+                    "spearman_rho": point, "ci95_low": lo, "ci95_high": hi,
+                })
+    family_assoc_df = pd.DataFrame(family_assoc_rows)
+    family_assoc_df.to_csv(RR_TABLES / "per_family_scalar_dependence.csv", index=False)
+
+    # Explicit family-demeaned association.
+    def demean_by_family(x, fam):
+        s = pd.Series(x)
+        f = pd.Series(fam)
+        return (s - s.groupby(f).transform("mean")).to_numpy(float)
+    demean_rows = []
+    for split, fam, y, f5, q5 in [
+        ("train", CTX.family_train, CTX.y_train, f5_tr, q5_tr),
+        ("test", CTX.family_test, CTX.y_test, f5_te, q5_te),
+    ]:
+        yd = demean_by_family(y, fam)
+        for descriptor, x in [("Li_fraction_below_5THz", f5), ("Li_q05_THz", q5)]:
+            xd = demean_by_family(x, fam)
+            point, lo, hi = bootstrap_spearman(
+                xd, yd, seed=_seed_from_text(split + descriptor, 10000))
+            demean_rows.append({"split": split, "descriptor": descriptor,
+                                "n": len(y), "spearman_rho": point,
+                                "ci95_low": lo, "ci95_high": hi})
+    pd.DataFrame(demean_rows).to_csv(RR_TABLES / "family_demeaned_scalar_associations.csv", index=False)
+
+    # Model ablations by family using genuinely out-of-fold train predictions
+    # and untouched official-test predictions.
+    family_model_rows = []
+    family_model_names = ["static_rbf", "li_wasserstein", "static_plus_li_wasserstein"]
+    for split, fams, y in [
+        ("train_OOF", CTX.family_train, CTX.y_train),
+        ("official_test", CTX.family_test, CTX.y_test),
+    ]:
+        for fam in sorted(set(fams)):
+            mask = np.asarray(fams) == fam
+            if mask.sum() < REVIEWER_MIN_FAMILY_N:
+                continue
+            for name in family_model_names:
+                pred = model_results[name]["oof_pred"] if split == "train_OOF" else model_results[name]["test_pred"]
+                family_model_rows.append({
+                    "split": split, "Family": fam, "model": name,
+                    **metric_bundle(y[mask], np.asarray(pred)[mask])
+                })
+    fam_model_df = pd.DataFrame(family_model_rows)
+    fam_model_df.to_csv(RR_TABLES / "per_family_model_ablation_metrics.csv", index=False)
+
+    # Incremental Li contribution after static prediction, by family.
+    inc_rows = []
+    for split, fams, y in [
+        ("train_OOF", CTX.family_train, CTX.y_train),
+        ("official_test", CTX.family_test, CTX.y_test),
+    ]:
+        p_s = model_results["static_rbf"]["oof_pred"] if split == "train_OOF" else model_results["static_rbf"]["test_pred"]
+        p_sl = model_results["static_plus_li_wasserstein"]["oof_pred"] if split == "train_OOF" else model_results["static_plus_li_wasserstein"]["test_pred"]
+        p_l = model_results["li_wasserstein"]["oof_pred"] if split == "train_OOF" else model_results["li_wasserstein"]["test_pred"]
+        for fam in sorted(set(fams)):
+            mask = np.asarray(fams) == fam
+            if mask.sum() < REVIEWER_MIN_FAMILY_N:
+                continue
+            inc_rows.append({
+                "split": split, "Family": fam, "n": int(mask.sum()),
+                "MAE_static": mean_absolute_error(y[mask], np.asarray(p_s)[mask]),
+                "MAE_Li_only": mean_absolute_error(y[mask], np.asarray(p_l)[mask]),
+                "MAE_static_plus_Li": mean_absolute_error(y[mask], np.asarray(p_sl)[mask]),
+                "delta_MAE_static_plus_Li_minus_static":
+                    mean_absolute_error(y[mask], np.asarray(p_sl)[mask])
+                    - mean_absolute_error(y[mask], np.asarray(p_s)[mask]),
+                "delta_MAE_Li_only_minus_static":
+                    mean_absolute_error(y[mask], np.asarray(p_l)[mask])
+                    - mean_absolute_error(y[mask], np.asarray(p_s)[mask]),
+            })
+    inc_df = pd.DataFrame(inc_rows)
+    inc_df.to_csv(RR_TABLES / "per_family_incremental_Li_information.csv", index=False)
+
+    # One separate scatter plot per sufficiently large family.
+    family_plot_dir = RR_FIGURES / "per_family_scatter"
+    family_plot_dir.mkdir(exist_ok=True)
+    for fam in sorted(set(CTX.family_train)):
+        mask = np.asarray(CTX.family_train) == fam
+        if mask.sum() < max(8, REVIEWER_MIN_FAMILY_N):
+            continue
+        fig, ax = plt.subplots(figsize=(5.6, 4.8))
+        ax.scatter(f5_tr[mask], CTX.y_train[mask], s=42)
+        ax.set_xlabel(r"Li-PDOS fraction below 5 THz")
+        ax.set_ylabel(r"$\log_{10}\sigma$ (S cm$^{-1}$)")
+        ax.set_title(f"{fam} (training, n={mask.sum()})")
+        fig.tight_layout()
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(fam))[:80]
+        save_pubfig(fig, family_plot_dir / f"{safe_name}_Li_fraction_below_5THz")
+
+    # Forest plot for train families.
+    d = family_assoc_df[(family_assoc_df["split"] == "train") &
+                        (family_assoc_df["descriptor"] == "Li_fraction_below_5THz")].copy()
+    if len(d):
+        d = d.sort_values("spearman_rho")
+        fig, ax = plt.subplots(figsize=(8.4, max(4.5, 0.42 * len(d))))
+        ypos = np.arange(len(d))
+        xerr = np.vstack([d["spearman_rho"] - d["ci95_low"], d["ci95_high"] - d["spearman_rho"]])
+        ax.errorbar(d["spearman_rho"], ypos, xerr=xerr, fmt="o", capsize=3)
+        ax.axvline(0, linestyle="--", linewidth=1)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(d["Family"])
+        ax.set_xlabel("Within-family Spearman $\\rho$")
+        ax.set_title("Family-specific low-frequency Li-PDOS associations")
+        fig.tight_layout()
+        save_pubfig(fig, RR_FIGURES / "per_family_Li_fraction_below_5THz_forest")
+
+# ------------------ OPTIONAL REFERENCE-SPECTRUM COMPARISONS ------------
+reference_template = pd.DataFrame([{
+    "case_id": "example_Li3PO4_LiPDOS",
+    "reference_type": "DFT_or_experiment_preprocessed",
+    "model_file": "/content/drive/MyDrive/path/model_spectrum.csv",
+    "reference_file": "/content/drive/MyDrive/path/reference_spectrum.csv",
+    "model_frequency_column": "Frequency_THz",
+    "model_intensity_column": "Li_PDOS",
+    "reference_frequency_column": "frequency_THz",
+    "reference_intensity_column": "intensity",
+    "spectrum_label": "Li-PDOS",
+    "notes": "For INS, model_file must already contain neutron-weighted and resolution-broadened intensity."
+}])
+reference_template.to_csv(RR_TEMPLATES / "reference_spectra_manifest_template.csv", index=False)
+
+def _read_named_curve(path, fcol, ycol):
+    df = pd.read_csv(path)
+    if fcol not in df.columns or ycol not in df.columns:
+        raise KeyError(f"Required columns {fcol!r}, {ycol!r} not found in {path}")
+    x = pd.to_numeric(df[fcol], errors="coerce").to_numpy(float)
+    y = pd.to_numeric(df[ycol], errors="coerce").to_numpy(float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], np.clip(y[ok], 0, None)
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    return x, y
+
+def _curve_metrics(xa, ya, xb, yb):
+    lo = max(0.0, float(np.min(xa)), float(np.min(xb)))
+    hi = min(float(np.max(xa)), float(np.max(xb)))
+    if hi <= lo:
+        raise ValueError("No overlapping positive-frequency interval.")
+    grid = np.linspace(lo, hi, 2001)
+    a = np.interp(grid, xa, ya, left=0, right=0)
+    b = np.interp(grid, xb, yb, left=0, right=0)
+    a = np.clip(a, 0, None); b = np.clip(b, 0, None)
+    aa = np.trapezoid(a, grid); bb = np.trapezoid(b, grid)
+    if aa <= 0 or bb <= 0:
+        raise ValueError("Zero integrated intensity.")
+    a /= aa; b /= bb
+    cdfa = np.concatenate([[0], cumulative_trapezoid(a, grid)])
+    cdfb = np.concatenate([[0], cumulative_trapezoid(b, grid)])
+    w1 = float(np.trapezoid(np.abs(cdfa - cdfb), grid))
+    overlap = float(np.trapezoid(np.minimum(a, b), grid))
+    ca = float(np.trapezoid(grid * a, grid)); cb = float(np.trapezoid(grid * b, grid))
+    f5a = float(np.trapezoid(a[grid <= 5], grid[grid <= 5])) if np.any(grid <= 5) else 0.0
+    f5b = float(np.trapezoid(b[grid <= 5], grid[grid <= 5])) if np.any(grid <= 5) else 0.0
+    q5a = float(np.interp(0.05, cdfa, grid)); q5b = float(np.interp(0.05, cdfb, grid))
+    return {
+        "common_min_THz": lo, "common_max_THz": hi,
+        "W1_THz": w1, "overlap": overlap,
+        "model_centroid_THz": ca, "reference_centroid_THz": cb,
+        "centroid_error_model_minus_reference_THz": ca - cb,
+        "model_fraction_below_5THz": f5a, "reference_fraction_below_5THz": f5b,
+        "delta_fraction_below_5THz": f5a - f5b,
+        "model_q05_THz": q5a, "reference_q05_THz": q5b,
+        "delta_q05_THz": q5a - q5b,
+    }, grid, a, b
+
+if RUN_OPTIONAL_REFERENCE_COMPARISONS and Path(REFERENCE_MANIFEST).exists():
+    ref_manifest = pd.read_csv(REFERENCE_MANIFEST)
+    ref_rows, ref_errors = [], []
+    for _, row in ref_manifest.iterrows():
+        try:
+            xa, ya = _read_named_curve(row["model_file"], row["model_frequency_column"],
+                                       row["model_intensity_column"])
+            xb, yb = _read_named_curve(row["reference_file"], row["reference_frequency_column"],
+                                       row["reference_intensity_column"])
+            met, grid, aa, bb = _curve_metrics(xa, ya, xb, yb)
+            ref_rows.append({"case_id": row["case_id"],
+                             "reference_type": row.get("reference_type", ""),
+                             "spectrum_label": row.get("spectrum_label", ""), **met})
+            fig, ax = plt.subplots(figsize=(6.3, 4.7))
+            ax.plot(grid, aa, label="MatterSim-Phonopy")
+            ax.plot(grid, bb, label="Reference")
+            ax.set_xlabel("Frequency (THz)")
+            ax.set_ylabel("Unit-area spectral density")
+            ax.set_title(str(row["case_id"]))
+            ax.legend()
+            fig.tight_layout()
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(row["case_id"]))[:100]
+            save_pubfig(fig, RR_VALIDATION / safe_name)
+        except Exception as exc:
+            ref_errors.append({"case_id": row.get("case_id", ""), "error": str(exc)})
+    pd.DataFrame(ref_rows).to_csv(RR_TABLES / "expanded_reference_validation_metrics.csv", index=False)
+    pd.DataFrame(ref_errors).to_csv(RR_TABLES / "expanded_reference_validation_errors.csv", index=False)
+
+# ---------------- OPTIONAL MATTERSIM-PHONOPY CONVERGENCE / NAC ----------
+convergence_template = pd.DataFrame([
+    {
+        "ID": "replace_with_obelix_id",
+        "cif_path": "/content/drive/MyDrive/path/to/starting_or_relaxed.cif",
+        "Family": "argyrodite",
+        "run_relaxation": True,
+        "nac_npz_path": "",
+        "notes": "nac_npz must contain born[natom,3,3], dielectric[3,3], factor[scalar]"
+    }
+])
+convergence_template.to_csv(RR_TEMPLATES / "convergence_manifest_template.csv", index=False)
+
+def _integrated_descriptor_from_curve(freq, density):
+    freq = np.asarray(freq, float); density = np.clip(np.asarray(density, float), 0, None)
+    order = np.argsort(freq); freq, density = freq[order], density[order]
+    neg = freq < 0; pos = (freq > 0) & (freq <= 100)
+    neg_area = float(np.trapezoid(density[neg], freq[neg])) if neg.sum() > 1 else 0.0
+    pos_area = float(np.trapezoid(density[pos], freq[pos])) if pos.sum() > 1 else 0.0
+    if pos_area <= 0:
+        raise ValueError("No positive-frequency area.")
+    x, y = freq[pos], density[pos] / pos_area
+    cum = np.concatenate([[0], cumulative_trapezoid(y, x)])
+    return {
+        "minimum_raw_frequency_THz": float(np.min(freq)),
+        "imaginary_area_fraction": neg_area / max(neg_area + pos_area, 1e-15),
+        "fraction_below_2THz": float(np.interp(2, x, cum, left=0, right=cum[-1])),
+        "fraction_below_5THz": float(np.interp(5, x, cum, left=0, right=cum[-1])),
+        "fraction_below_10THz": float(np.interp(10, x, cum, left=0, right=cum[-1])),
+        "q05_THz": float(np.interp(0.05, cum, x)),
+        "q50_THz": float(np.interp(0.50, cum, x)),
+        "centroid_THz": float(np.trapezoid(x * y, x)),
+    }
+
+def _normalized_curve(freq, density, lo=0, hi=100, n=4001):
+    grid = np.linspace(lo, hi, n)
+    y = np.interp(grid, freq, np.clip(density, 0, None), left=0, right=0)
+    area = np.trapezoid(y, grid)
+    if area <= 0:
+        raise ValueError("Zero area")
+    return grid, y / area
+
+def _w1_curves(freq_a, den_a, freq_b, den_b, hi=100):
+    grid, a = _normalized_curve(freq_a, den_a, 0, hi)
+    _, b = _normalized_curve(freq_b, den_b, 0, hi)
+    ca = np.concatenate([[0], cumulative_trapezoid(a, grid)])
+    cb = np.concatenate([[0], cumulative_trapezoid(b, grid)])
+    return float(np.trapezoid(np.abs(ca - cb), grid))
+
+def run_optional_convergence():
+    if not (RUN_OPTIONAL_PHONON_CONVERGENCE and Path(CONVERGENCE_MANIFEST).exists()):
+        print("No convergence manifest found; template was created and convergence calculations were skipped.")
+        return
+    print("\nStarting optional MatterSim-Phonopy convergence calculations.")
+    import importlib.util, subprocess, sys, gc
+    packages = [ASE_PACKAGE_SPEC, PHONOPY_PACKAGE_SPEC,
+                MATTERSIM_PACKAGE_SPEC, PYMATGEN_PACKAGE_SPEC]
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", *packages])
+    import torch as _torch
+    import ase as _ase
+    import phonopy as _phonopy_pkg
+    import mattersim as _mattersim_pkg
+    from ase.io import read as ase_read, write as ase_write
+    from ase import Atoms
+    from ase.filters import ExpCellFilter
+    from ase.optimize import LBFGS
+    from mattersim.forcefield import MatterSimCalculator
+    from phonopy import Phonopy
+    from phonopy.structure.atoms import PhonopyAtoms
+
+    version_info = {
+        "python": platform.python_version(),
+        "numpy": np.__version__, "pandas": pd.__version__,
+        "ase": getattr(_ase, "__version__", "unknown"),
+        "phonopy": getattr(_phonopy_pkg, "__version__", "unknown"),
+        "mattersim": getattr(_mattersim_pkg, "__version__", "unknown"),
+        "torch": _torch.__version__,
+        "device": str(DEVICE_NAME),
+        "MatterSim_calculator_call": "MatterSimCalculator() default checkpoint",
+    }
+    (RR_CONVERGENCE / "software_versions.json").write_text(json.dumps(version_info, indent=2))
+
+    manifest = pd.read_csv(CONVERGENCE_MANIFEST)
+    calc = MatterSimCalculator()
+    all_spectra, all_meta, errors, nac_rows = {}, [], [], []
+    raw_dir = RR_CONVERGENCE / "raw_spectra"
+    relaxed_dir = RR_CONVERGENCE / "relaxed_structures"
+    raw_dir.mkdir(exist_ok=True); relaxed_dir.mkdir(exist_ok=True)
+
+    def make_phonon(atoms, scell, disp):
+        pat = PhonopyAtoms(
+            symbols=atoms.get_chemical_symbols(),
+            cell=atoms.cell.array,
+            scaled_positions=atoms.get_scaled_positions()
+        )
+        ph = Phonopy(pat, np.diag(scell))
+        ph.generate_displacements(distance=float(disp))
+        forces = []
+        for jj, sc in enumerate(ph.supercells_with_displacements):
+            asc = Atoms(symbols=sc.symbols, positions=sc.positions, cell=sc.cell, pbc=True)
+            asc.calc = calc
+            forces.append(asc.get_forces())
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+            if (jj + 1) % 5 == 0:
+                gc.collect()
+        ph.produce_force_constants(forces)
+        ph.symmetrize_force_constants()
+        return ph
+
+    def dos_from_phonon(ph, mesh, nac_params=None):
+        ph.nac_params = nac_params
+        ph.run_mesh(mesh, with_eigenvectors=True, is_mesh_symmetry=False)
+        ph.run_projected_dos()
+        dct = ph.get_projected_dos_dict()
+        freq = np.asarray(dct["frequency_points"], float)
+        atom_pdos = np.asarray(dct["projected_dos"], float)
+        symbols = [str(s).strip().capitalize() for s in ph.primitive.symbols]
+        li_idx = [i for i, s in enumerate(symbols) if s.startswith("Li")]
+        if not li_idx:
+            raise ValueError("No Li atoms in Phonopy primitive cell.")
+        total = atom_pdos.sum(axis=0)
+        li = atom_pdos[li_idx].sum(axis=0)
+        return freq, total, li
+
+    for _, row in manifest.iterrows():
+        oid = str(row["ID"]).strip().lower()
+        try:
+            atoms = ase_read(str(row["cif_path"]))
+            atoms.pbc = True
+            atoms.calc = calc
+            do_relax = str(row.get("run_relaxation", "True")).strip().lower() in {"1", "true", "yes", "y"}
+            if do_relax:
+                LBFGS(atoms, logfile=str(RR_CONVERGENCE / f"{oid}_relax_stage1.log"), memory=50).run(
+                    fmax=CONVERGENCE_RELAX_STAGE1_FMAX)
+                LBFGS(ExpCellFilter(atoms),
+                      logfile=str(RR_CONVERGENCE / f"{oid}_relax_stage2.log"), memory=100).run(
+                    fmax=CONVERGENCE_RELAX_STAGE2_FMAX)
+            relaxed_path = relaxed_dir / f"{oid}_relaxed.cif"
+            ase_write(relaxed_path, atoms)
+
+            fc_cache = {}
+            for scell in CONVERGENCE_SUPERCELLS:
+                for disp in CONVERGENCE_DISPLACEMENTS_A:
+                    key_fc = (tuple(scell), float(disp))
+                    print(f"  {oid}: supercell={scell}, displacement={disp:.3f} A")
+                    ph = make_phonon(atoms, scell, disp)
+                    fc_cache[key_fc] = ph
+                    meshes = CONVERGENCE_QMESHES if (
+                        tuple(scell) == tuple(PRODUCTION_SUPERCELL)
+                        and abs(float(disp) - PRODUCTION_DISPLACEMENT_A) < 1e-12
+                    ) else (PRODUCTION_QMESH,)
+                    for mesh in meshes:
+                        freq, total, li = dos_from_phonon(ph, mesh, nac_params=None)
+                        config = f"sc{scell[0]}{scell[1]}{scell[2]}_d{disp:.3f}_q{mesh[0]}{mesh[1]}{mesh[2]}"
+                        out = pd.DataFrame({"Frequency_THz": freq, "Total_DOS": total, "Li_PDOS": li})
+                        out.to_csv(raw_dir / f"{oid}_{config}.csv", index=False)
+                        all_spectra[(oid, config, "total")] = (freq, total)
+                        all_spectra[(oid, config, "Li")] = (freq, li)
+                        for spec_label, den in [("total", total), ("Li", li)]:
+                            all_meta.append({
+                                "ID": oid, "Family": row.get("Family", ""),
+                                "supercell": "x".join(map(str, scell)),
+                                "displacement_A": float(disp),
+                                "qmesh": "x".join(map(str, mesh)),
+                                "config": config, "spectrum": spec_label,
+                                **_integrated_descriptor_from_curve(freq, den)
+                            })
+
+            # Optional NAC comparison on the production force constants.
+            nac_path = str(row.get("nac_npz_path", "")).strip()
+            if RUN_OPTIONAL_NAC and nac_path and nac_path.lower() not in {"nan", "none"} and Path(nac_path).exists():
+                ph = fc_cache[(tuple(PRODUCTION_SUPERCELL), float(PRODUCTION_DISPLACEMENT_A))]
+                z = np.load(nac_path)
+                born = np.asarray(z["born"], float)
+                dielectric = np.asarray(z["dielectric"], float)
+                factor = float(np.asarray(z["factor"]).reshape(-1)[0])
+                if born.shape[0] != len(ph.primitive):
+                    raise ValueError(
+                        f"NAC Born tensor count {born.shape[0]} != primitive atom count {len(ph.primitive)}")
+                nac_params = {"born": born, "dielectric": dielectric, "factor": factor}
+                f0, t0, l0 = dos_from_phonon(ph, PRODUCTION_QMESH, nac_params=None)
+                f1, t1, l1 = dos_from_phonon(ph, PRODUCTION_QMESH, nac_params=nac_params)
+                for spec_label, d0, d1 in [("total", t0, t1), ("Li", l0, l1)]:
+                    a = _integrated_descriptor_from_curve(f0, d0)
+                    b = _integrated_descriptor_from_curve(f1, d1)
+                    nac_rows.append({
+                        "ID": oid, "spectrum": spec_label,
+                        "W1_noNAC_vs_NAC_THz": _w1_curves(f0, d0, f1, d1),
+                        "delta_fraction_below_5THz_NAC_minus_noNAC":
+                            b["fraction_below_5THz"] - a["fraction_below_5THz"],
+                        "delta_q05_THz_NAC_minus_noNAC": b["q05_THz"] - a["q05_THz"],
+                        "delta_centroid_THz_NAC_minus_noNAC":
+                            b["centroid_THz"] - a["centroid_THz"],
+                    })
+                    fig, ax = plt.subplots(figsize=(6.2, 4.7))
+                    g0, y0 = _normalized_curve(f0, d0, 0, min(30, max(f0.max(), f1.max())))
+                    g1, y1 = _normalized_curve(f1, d1, 0, min(30, max(f0.max(), f1.max())))
+                    ax.plot(g0, y0, label="No NAC")
+                    ax.plot(g1, y1, label="With NAC")
+                    ax.set_xlabel("Frequency (THz)")
+                    ax.set_ylabel("Unit-area spectral density")
+                    ax.set_title(f"{oid}: {spec_label} NAC sensitivity")
+                    ax.legend()
+                    fig.tight_layout()
+                    save_pubfig(fig, RR_CONVERGENCE / f"{oid}_{spec_label}_NAC_sensitivity")
+        except Exception as exc:
+            errors.append({"ID": oid, "error": str(exc), "traceback": traceback.format_exc()})
+            print(f"WARNING convergence failed for {oid}: {exc}")
+
+    meta_df = pd.DataFrame(all_meta)
+    meta_df.to_csv(RR_TABLES / "phonon_convergence_raw_descriptors.csv", index=False)
+    pd.DataFrame(errors).to_csv(RR_TABLES / "phonon_convergence_errors.csv", index=False)
+    pd.DataFrame(nac_rows).to_csv(RR_TABLES / "NAC_sensitivity_metrics.csv", index=False)
+
+    # Compare every convergence spectrum with the production configuration.
+    comp_rows = []
+    prod_config = (
+        f"sc{PRODUCTION_SUPERCELL[0]}{PRODUCTION_SUPERCELL[1]}{PRODUCTION_SUPERCELL[2]}"
+        f"_d{PRODUCTION_DISPLACEMENT_A:.3f}"
+        f"_q{PRODUCTION_QMESH[0]}{PRODUCTION_QMESH[1]}{PRODUCTION_QMESH[2]}"
+    )
+    for (oid, config, spec_label), (freq, den) in all_spectra.items():
+        ref_key = (oid, prod_config, spec_label)
+        if ref_key not in all_spectra:
+            continue
+        fr, dr = all_spectra[ref_key]
+        a = _integrated_descriptor_from_curve(fr, dr)
+        b = _integrated_descriptor_from_curve(freq, den)
+        comp_rows.append({
+            "ID": oid, "config": config, "reference_config": prod_config,
+            "spectrum": spec_label,
+            "W1_0_to_100THz": _w1_curves(fr, dr, freq, den, hi=100),
+            "W1_0_to_10THz": _w1_curves(fr, dr, freq, den, hi=10),
+            "delta_fraction_below_5THz": b["fraction_below_5THz"] - a["fraction_below_5THz"],
+            "delta_q05_THz": b["q05_THz"] - a["q05_THz"],
+            "delta_centroid_THz": b["centroid_THz"] - a["centroid_THz"],
+            "delta_imaginary_area_fraction":
+                b["imaginary_area_fraction"] - a["imaginary_area_fraction"],
+        })
+    comp_df = pd.DataFrame(comp_rows)
+    comp_df.to_csv(RR_TABLES / "phonon_convergence_vs_production.csv", index=False)
+
+    if len(comp_df):
+        for oid in sorted(comp_df["ID"].unique()):
+            d = comp_df[(comp_df["ID"] == oid) & (comp_df["spectrum"] == "Li")].copy()
+            if d.empty:
+                continue
+            fig, ax = plt.subplots(figsize=(10.5, 5.0))
+            ax.plot(np.arange(len(d)), d["delta_fraction_below_5THz"], marker="o",
+                    label=r"$\Delta F_{\mathrm{Li}}(<5\,\mathrm{THz})$")
+            ax.plot(np.arange(len(d)), d["delta_q05_THz"], marker="s",
+                    label=r"$\Delta\nu_{5\%,\mathrm{Li}}$ (THz)")
+            ax.set_xticks(np.arange(len(d)))
+            ax.set_xticklabels(d["config"], rotation=70, ha="right")
+            ax.axhline(0, linewidth=1, linestyle="--")
+            ax.set_title(f"{oid}: convergence relative to production settings")
+            ax.legend()
+            fig.tight_layout()
+            save_pubfig(fig, RR_CONVERGENCE / f"{oid}_Li_descriptor_convergence")
+
+run_optional_convergence()
+
+# -------------------------- REPRODUCIBILITY ----------------------------
+# Save exact cohort IDs and all primary predictions in one release table.
+release = pd.DataFrame({
+    "ID": np.r_[CTX.train_ids, CTX.test_ids],
+    "split": ["train"] * len(CTX.train_ids) + ["test"] * len(CTX.test_ids),
+    "Family": np.r_[CTX.family_train, CTX.family_test],
+    "log10_conductivity_limit_policy":
+        np.r_[CTX.y_train, CTX.y_test],
+    "is_upper_limit":
+        np.r_[CTX.meta_train["ic_is_upper_limit"].astype(bool).to_numpy(),
+              CTX.meta_test["ic_is_upper_limit"].astype(bool).to_numpy()],
+})
+release.to_csv(RR_TABLES / "processed_cohort_identifiers_and_targets.csv", index=False)
+
+reviewer_config = {
+    "random_seed": REVIEWER_RANDOM_SEED,
+    "bootstrap_replicates": REVIEWER_BOOTSTRAP,
+    "outer_folds": REVIEWER_OUTER_FOLDS,
+    "inner_folds": REVIEWER_INNER_FOLDS,
+    "production_workflow": {
+        "supercell": PRODUCTION_SUPERCELL,
+        "displacement_A": PRODUCTION_DISPLACEMENT_A,
+        "qmesh": PRODUCTION_QMESH,
+        "total_DOS_definition": "sum of all atom-projected DOS from the same projected-DOS calculation",
+        "Li_PDOS_definition": "sum of Li atom-projected DOS from the same projected-DOS calculation",
+    },
+    "optional_manifests": {
+        "convergence_manifest": CONVERGENCE_MANIFEST,
+        "reference_manifest": REFERENCE_MANIFEST,
+    },
+    "switches": {
+        "scalar_baselines": RUN_REVIEWER_SCALAR_BASELINES,
+        "frequency_warp": RUN_REVIEWER_FREQUENCY_WARP,
+        "stability_sensitivity": RUN_REVIEWER_STABILITY_SENSITIVITY,
+        "formal_tobit_kernel": RUN_REVIEWER_TOBIT_KERNEL,
+        "fusion_ablations": RUN_REVIEWER_FUSION_ABLATIONS,
+        "family_analyses": RUN_REVIEWER_FAMILY_ANALYSES,
+        "optional_reference_comparisons": RUN_OPTIONAL_REFERENCE_COMPARISONS,
+        "optional_phonon_convergence": RUN_OPTIONAL_PHONON_CONVERGENCE,
+        "optional_NAC": RUN_OPTIONAL_NAC,
+    },
+}
+(RR_RESULTS / "reviewer_run_config.json").write_text(json.dumps(reviewer_config, indent=2, default=list))
+
+readme = """
+OBELiX reviewer-response output package
+=======================================
+
+Automatically generated from the raw Drive spectra and official OBELiX split.
+
+Core outputs that run without additional inputs:
+  tables/scalar_baseline_performance.csv
+  tables/scalar_vs_full_distribution_paired_bootstrap.csv
+  tables/frequency_warp_sensitivity.csv
+  tables/Li_PDOS_imaginary_mode_QC.csv
+  tables/imaginary_mode_exclusion_sensitivity.csv
+  tables/censoring_counts_by_split_and_family.csv
+  tables/formal_censored_kernel_regression_performance.csv
+  tables/fusion_and_stacking_ablation_performance.csv
+  tables/per_family_scalar_dependence.csv
+  tables/per_family_model_ablation_metrics.csv
+  tables/per_family_incremental_Li_information.csv
+
+Optional analyses:
+  1. Put convergence_manifest.csv at CONVERGENCE_MANIFEST to run representative
+     2x2x2-versus-3x3x3, displacement, q-mesh, and optional NAC tests.
+  2. Put reference_spectra_manifest.csv at REFERENCE_MANIFEST to compare additional
+     exact-phase DFT spectra or properly preprocessed experimental spectra.
+  3. NAC requires an NPZ file containing born, dielectric, and factor arrays. Born
+     tensors must follow the Phonopy primitive-cell atom order.
+  4. Experimental INS should be compared only after neutron weighting and
+     instrument-resolution broadening; the code does not infer these corrections.
+
+All reviewer figures are saved as vector PDF and 600-dpi PNG. CSV files retain
+material identifiers and model predictions for exact reproduction.
+"""
+(RR_RESULTS / "README.txt").write_text(readme)
+
+# Copy templates to Drive even when optional calculations were skipped.
+Path(FINAL_OUTPUT_DRIVE_DIR).mkdir(parents=True, exist_ok=True)
+drive_template_dir = Path(FINAL_OUTPUT_DRIVE_DIR) / "reviewer_input_templates"
+drive_template_dir.mkdir(parents=True, exist_ok=True)
+for t in RR_TEMPLATES.glob("*.csv"):
+    shutil.copy2(t, drive_template_dir / t.name)
+
+# ------------------------ COMBINED FINAL ARCHIVE -----------------------
+COMBINED = Path("/content/obelix_reviewer_complete")
+if COMBINED.exists():
+    shutil.rmtree(COMBINED)
+COMBINED.mkdir(parents=True)
+assoc_results_path = Path("/content/obelix_dos_pdos_association/results")
+kernel_results_path = Path("/content/obelix_kernel_publication/results")
+if assoc_results_path.exists():
+    shutil.copytree(assoc_results_path, COMBINED / "association_results")
+if kernel_results_path.exists():
+    shutil.copytree(kernel_results_path, COMBINED / "kernel_results")
+shutil.copytree(RR_RESULTS, COMBINED / "reviewer_response_results")
+
+final_zip = Path("/content") / FINAL_ZIP_NAME
+if final_zip.exists():
+    final_zip.unlink()
+shutil.make_archive(str(final_zip.with_suffix("")), "zip", root_dir=COMBINED)
+drive_zip = Path(FINAL_OUTPUT_DRIVE_DIR) / FINAL_ZIP_NAME
+shutil.copy2(final_zip, drive_zip)
+print(f"\nComplete reviewer-response archive saved to:\n  {drive_zip}")
+print(f"Local Colab copy:\n  {final_zip}")
+
+try:
+    from google.colab import files
+    print('Final local archive:', final_zip)
+except Exception as exc:
+    print(f"Browser download did not start automatically: {exc}")

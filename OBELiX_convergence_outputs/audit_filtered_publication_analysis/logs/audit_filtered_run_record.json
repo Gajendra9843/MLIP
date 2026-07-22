@@ -1,0 +1,29 @@
+{
+  "random_seed": 20260718,
+  "train_root": "/content/obelix_audit_filtered_spectra/Train_cif",
+  "test_root": "/content/obelix_audit_filtered_spectra/Test_cif",
+  "audit_csv": "/content/drive/MyDrive/OBELiX_composition_audit/tables/production_structure_composition_audit.csv",
+  "audit_sha256": "d6f76d8fc8e8f76ab7beaf59cde152df6b3cf67aa01b98a6f1aebb545b226626",
+  "master_script": "/content/obelix_reviewer_response_onecell_code_2.py",
+  "master_script_sha256": "78821029d679fb0b48b1ef4da5044dbe6d1cf4fa767e4bf7da7bfb57041ec07a",
+  "primary_statuses": [
+    "PASS",
+    "PASS_INTEGERIZED_COMPOSITION",
+    "WARN_INTEGERIZATION_APPROXIMATION"
+  ],
+  "strict_statuses": [
+    "PASS",
+    "PASS_INTEGERIZED_COMPOSITION"
+  ],
+  "exact_statuses": [
+    "PASS"
+  ],
+  "include_short_distance_warnings": false,
+  "n_primary_train": 214,
+  "n_primary_test": 48,
+  "reference_manifest": "/content/no_reference_manifest.csv",
+  "reference_pairs_resolved": 0,
+  "reference_pairs_failed": 0,
+  "convergence_manifest": "/content/no_convergence_manifest.csv",
+  "figure_policy": "No titles; large fonts; PDF+600-dpi PNG+CSV for every publication panel"
+}

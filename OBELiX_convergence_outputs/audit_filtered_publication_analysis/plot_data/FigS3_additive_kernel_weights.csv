@@ -1,0 +1,8 @@
+label,mean,std,count
+static_plus_li_plus_total | li_wasserstein,0.25,0.1767766952966369,5
+static_plus_li_plus_total | static_rbf,0.55,0.37080992435478316,5
+static_plus_li_plus_total | total_wasserstein,0.2,0.2091650066335189,5
+static_plus_li_wasserstein | li_wasserstein,0.44000000000000006,0.3286335345030996,5
+static_plus_li_wasserstein | static_rbf,0.5599999999999999,0.3286335345030997,5
+static_plus_total_wasserstein | static_rbf,0.72,0.3346640106136303,5
+static_plus_total_wasserstein | total_wasserstein,0.28,0.33466401061363027,5

@@ -1,0 +1,25 @@
+split,cohort,descriptor,n,spearman_rho,label
+train,primary,Li_q05_THz,214,-0.6075117386303199,Li q05 THz | train | primary
+train,strict,Li_q05_THz,200,-0.6059959667845596,Li q05 THz | train | strict
+train,exact,Li_q05_THz,134,-0.5729732522169485,Li q05 THz | train | exact
+test,exact,Li_q05_THz,35,-0.5451753907502761,Li q05 THz | test | exact
+test,exact,total_q05_THz,35,-0.4699535994126801,total q05 THz | test | exact
+train,strict,total_q05_THz,200,-0.45416448043529595,total q05 THz | train | strict
+train,primary,total_q05_THz,214,-0.45295108945290075,total q05 THz | train | primary
+train,exact,total_q05_THz,134,-0.438688970517251,total q05 THz | train | exact
+test,strict,Li_q05_THz,43,-0.40224061220331453,Li q05 THz | test | strict
+test,primary,Li_q05_THz,48,-0.39315737484453195,Li q05 THz | test | primary
+test,strict,total_q05_THz,43,-0.21716970328155946,total q05 THz | test | strict
+test,primary,total_q05_THz,48,-0.18388100069923222,total q05 THz | test | primary
+test,primary,total_fraction_below_5THz,48,0.2757052131883338,total fraction below 5THz | test | primary
+test,strict,total_fraction_below_5THz,43,0.3143166860595501,total fraction below 5THz | test | strict
+test,primary,Li_fraction_below_5THz,48,0.3743889655016008,Li fraction below 5THz | test | primary
+test,strict,Li_fraction_below_5THz,43,0.39543066955878886,Li fraction below 5THz | test | strict
+train,exact,total_fraction_below_5THz,134,0.44047989934301846,total fraction below 5THz | train | exact
+train,strict,total_fraction_below_5THz,200,0.45129353366651676,total fraction below 5THz | train | strict
+train,primary,total_fraction_below_5THz,214,0.45427072775090227,total fraction below 5THz | train | primary
+train,exact,Li_fraction_below_5THz,134,0.509025411497482,Li fraction below 5THz | train | exact
+train,strict,Li_fraction_below_5THz,200,0.5252488321756854,Li fraction below 5THz | train | strict
+train,primary,Li_fraction_below_5THz,214,0.5315335637158232,Li fraction below 5THz | train | primary
+test,exact,Li_fraction_below_5THz,35,0.5557054330645358,Li fraction below 5THz | test | exact
+test,exact,total_fraction_below_5THz,35,0.5674990804565068,total fraction below 5THz | test | exact

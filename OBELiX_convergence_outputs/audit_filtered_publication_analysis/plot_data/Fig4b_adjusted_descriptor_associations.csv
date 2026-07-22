@@ -1,0 +1,13 @@
+split,descriptor,adjustment,rho,low,high,label
+test,LiPDOS_029.00_030.00THz,Static residual,-0.4913156752062527,-0.7018274,-0.22599508,LiPDOS 029.00 030.00THz | Static residual | test
+test,LiPDOS_007.00_008.00THz,Static residual,-0.4474598349978289,-0.65581465,-0.1881588,LiPDOS 007.00 008.00THz | Static residual | test
+train,LiPDOS_031.00_032.00THz,Static residual,-0.3351573907693061,-0.47291937,-0.19654462,LiPDOS 031.00 032.00THz | Static residual | train
+train,LiPDOS_011.00_012.00THz,Static residual,-0.2993905182890431,-0.43173087,-0.15813616,LiPDOS 011.00 012.00THz | Static residual | train
+train,Li_q05_THz,Family-demeaned,-0.2592598370932636,-0.3946382058982497,-0.108591383250262,Li q05 THz | Family-demeaned | train
+train,LiPDOS_030.00_031.00THz,Static residual,-0.2456275580017816,-0.39022616,-0.08342585,LiPDOS 030.00 031.00THz | Static residual | train
+test,Li_q05_THz,Family-demeaned,-0.161825162807194,-0.4693248520011464,0.1667906842590571,Li q05 THz | Family-demeaned | test
+train,Li_fraction_below_5THz,Family-demeaned,0.1429928483981347,-0.0078562042272254,0.2834292872184893,Li fraction below 5THz | Family-demeaned | train
+test,Li_fraction_below_5THz,Family-demeaned,0.201410254785939,-0.113983537363902,0.4809286735599023,Li fraction below 5THz | Family-demeaned | test
+train,LiPDOS_006.00_007.00THz,Static residual,0.3564056803328119,0.20827578,0.48986316,LiPDOS 006.00 007.00THz | Static residual | train
+test,LiPDOS_037.00_038.00THz,Static residual,0.442574902301346,0.18516292,0.6475185,LiPDOS 037.00 038.00THz | Static residual | test
+test,LiPDOS_010.00_011.00THz,Static residual,0.4966348241424229,0.22097336,0.7296241,LiPDOS 010.00 011.00THz | Static residual | test

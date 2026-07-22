@@ -1,0 +1,3 @@
+split,root,expected_materials,Li_PDOS_files_found,Total_DOS_files_found,paired_materials_found,missing_Li_IDs,missing_total_IDs,unexpected_paired_IDs
+train,/content/obelix_audit_filtered_spectra/Train_cif,214,214,214,214,,,
+test,/content/obelix_audit_filtered_spectra/Test_cif,48,48,48,48,,,

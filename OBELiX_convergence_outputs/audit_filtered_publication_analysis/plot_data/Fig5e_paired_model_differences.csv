@@ -1,0 +1,5 @@
+model,baseline,metric,difference_model_minus_baseline,ci95_low,ci95_high,bootstrap_p_two_sided,better_direction,display
+static_plus_li_wasserstein,static_rbf,MAE,-0.2876036445533225,-0.6292145889015078,0.0356642770325116,0.084,negative,MAE
+static_plus_li_wasserstein,static_rbf,RMSE,-0.5132162797341078,-0.7915516738334601,-0.2138823512739942,0.0012,negative,RMSE
+static_plus_li_wasserstein,static_rbf,R2,0.2859400357432318,0.1121270748655598,0.5806631332694565,0.0012,positive,R2
+static_plus_li_wasserstein,static_rbf,Spearman_rho,0.2235888765201365,0.0531462580933385,0.4207799006192357,0.0052,positive,Spearman ρ
