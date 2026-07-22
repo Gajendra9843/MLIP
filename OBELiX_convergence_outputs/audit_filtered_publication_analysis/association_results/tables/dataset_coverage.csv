@@ -1,0 +1,3 @@
+split,OBELiX_rows,valid_target_rows,parsed_DOS,parsed_Li_PDOS,paired_DOS_and_PDOS,DOS_with_target,PDOS_with_target,paired_with_target
+train,478,478,214,214,214,214,214,214
+test,121,121,48,48,48,48,48,48

@@ -1,0 +1,72 @@
+OBELiX DOS / Li-PDOS ASSOCIATION WORKFLOW
+====================================================
+Device: NVIDIA A100-SXM4-80GB
+Frequency inclusion: 0 < frequency <= 100.0 THz
+Negative-frequency structures were NOT removed; only non-positive frequency points were excluded from features.
+Primary bin width: 1.0 THz; sensitivity widths: (0.5, 1.0, 2.0)
+Primary target: log10_ic_limit
+
+Coverage:
+split  OBELiX_rows  valid_target_rows  parsed_DOS  parsed_Li_PDOS  paired_DOS_and_PDOS  DOS_with_target  PDOS_with_target  paired_with_target
+train          478                478         214             214                  214              214               214                 214
+ test          121                121          48              48                   48               48                48                  48
+
+Top train effects: total_shape
+                  feature   n  spearman_rho  spearman_ci95_low  spearman_ci95_high  spearman_p_fdr  spearman_p_maxT  distance_correlation  mutual_information  nonlinear_spline_gain_R2
+totalDOS_020.00_021.00THz 214     -0.468208          -0.570176           -0.362434    1.536462e-11           0.0002              0.435446            0.178809                  0.014974
+totalDOS_001.00_002.00THz 214      0.467487           0.360604            0.572585    1.536462e-11           0.0002              0.439902            0.346638                  0.036824
+totalDOS_018.00_019.00THz 214     -0.455204          -0.560644           -0.353079    3.789948e-11           0.0002              0.394141            0.174491                  0.062364
+totalDOS_002.00_003.00THz 214      0.454847           0.348889            0.557004    3.789948e-11           0.0002              0.450101            0.330604                 -0.018297
+totalDOS_024.00_025.00THz 214     -0.438574          -0.529799           -0.337170    2.153100e-10           0.0002              0.412807            0.090074                  0.072375
+totalDOS_023.00_024.00THz 214     -0.430519          -0.528573           -0.329204    4.559182e-10           0.0002              0.397228            0.078562                  0.062880
+totalDOS_014.00_015.00THz 214     -0.422129          -0.525160           -0.317416    1.005974e-09           0.0002              0.429491            0.233757                  0.005600
+totalDOS_022.00_023.00THz 214     -0.410952          -0.514200           -0.310439    2.980640e-09           0.0002              0.373222            0.076046                  0.072415
+totalDOS_021.00_022.00THz 214     -0.404168          -0.501987           -0.300112    5.071868e-09           0.0002              0.360045            0.126140                  0.034825
+totalDOS_000.00_001.00THz 214      0.403825           0.286775            0.520353    5.071868e-09           0.0002              0.323489            0.205768                 -0.090894
+
+Top train effects: li_shape
+                feature   n  spearman_rho  spearman_ci95_low  spearman_ci95_high  spearman_p_fdr  spearman_p_maxT  distance_correlation  mutual_information  nonlinear_spline_gain_R2
+LiPDOS_001.00_002.00THz 214      0.582957           0.494723            0.664379    4.263650e-19           0.0002              0.531465            0.232002                  0.130999
+LiPDOS_002.00_003.00THz 214      0.554197           0.458202            0.644992    3.767637e-17           0.0002              0.509969            0.279956                  0.163555
+LiPDOS_005.00_006.00THz 214      0.536953           0.435848            0.630850    4.433348e-16           0.0002              0.512462            0.346522                  0.143162
+LiPDOS_000.00_001.00THz 214      0.482992           0.385104            0.578601    9.895323e-13           0.0002              0.444731            0.236018                  0.079402
+LiPDOS_003.00_004.00THz 214      0.477610           0.374885            0.572699    1.631288e-12           0.0002              0.420791            0.243346                  0.156258
+LiPDOS_004.00_005.00THz 214      0.454761           0.344429            0.551560    2.553381e-11           0.0002              0.415242            0.169725                  0.181046
+LiPDOS_006.00_007.00THz 214      0.441523           0.332943            0.545123    1.086364e-10           0.0002              0.412420            0.289844                  0.118326
+LiPDOS_024.00_025.00THz 214     -0.439101          -0.529562           -0.336827    1.264964e-10           0.0002              0.409448            0.108649                  0.070765
+LiPDOS_023.00_024.00THz 214     -0.429382          -0.525782           -0.328908    3.460194e-10           0.0002              0.383218            0.081712                  0.040581
+LiPDOS_014.00_015.00THz 214     -0.416083          -0.525641           -0.303977    1.369720e-09           0.0002              0.395318            0.194007                 -0.016521
+
+Top train effects: compact_descriptors
+                      feature   n  spearman_rho  spearman_ci95_low  spearman_ci95_high  spearman_p_fdr  spearman_p_maxT  distance_correlation  mutual_information  nonlinear_spline_gain_R2
+               LiPDOS_q05_THz 214     -0.604620          -0.684115           -0.510812    2.638435e-21           0.0002              0.592421            0.317174                  0.014471
+   LiPDOS_fraction_below_2THz 214      0.582294           0.493219            0.660016    1.046971e-19           0.0002              0.530614            0.218787                  0.107516
+   LiPDOS_fraction_below_5THz 214      0.531534           0.425134            0.623499    4.580374e-16           0.0002              0.476909            0.362296                  0.204148
+  LiPDOS_fraction_below_20THz 214      0.485678           0.393965            0.578045    2.974335e-13           0.0002              0.365390            0.294824                  0.290701
+totalDOS_fraction_below_10THz 214      0.478331           0.368383            0.582027    6.420894e-13           0.0002              0.469851            0.356073                  0.081520
+          totalDOS_median_THz 214     -0.468457          -0.575016           -0.356190    1.847730e-12           0.0002              0.450670            0.344060                  0.117019
+totalDOS_fraction_below_20THz 214      0.467712           0.352555            0.565231    1.847730e-12           0.0002              0.392561            0.285147                  0.134061
+ totalDOS_fraction_below_2THz 214      0.463836           0.345565            0.574480    2.657282e-12           0.0002              0.430463            0.351546                  0.024905
+ totalDOS_fraction_below_5THz 214      0.454271           0.344010            0.558205    7.837497e-12           0.0002              0.438186            0.376023                  0.035089
+             totalDOS_q95_THz 214     -0.452843          -0.560231           -0.339429    8.409584e-12           0.0002              0.389340            0.343433                  0.038427
+
+Held-out model performance:
+        cohort                   feature_set       model  n_train  n_test      MAE     RMSE        R2  Spearman_rho
+    DOS cohort                   static only     RidgeCV      214      48 2.848726 3.585422 -0.266471      0.392069
+    DOS cohort                   static only XGBoost_GPU      214      48 1.914680 2.722465  0.269804      0.494575
+    DOS cohort                   total_shape     RidgeCV      214      48 2.308033 2.899253  0.171892      0.398706
+    DOS cohort                   total_shape XGBoost_GPU      214      48 2.280189 2.903575  0.169421      0.426952
+    DOS cohort          static + total_shape     RidgeCV      214      48 2.687847 3.267249 -0.051669      0.400610
+    DOS cohort          static + total_shape XGBoost_GPU      214      48 1.826671 2.556691  0.356022      0.556524
+Li-PDOS cohort                   static only     RidgeCV      214      48 2.848726 3.585422 -0.266471      0.392069
+Li-PDOS cohort                   static only XGBoost_GPU      214      48 1.914680 2.722465  0.269804      0.494575
+Li-PDOS cohort                      li_shape     RidgeCV      214      48 2.130166 2.701495  0.281010      0.500110
+Li-PDOS cohort                      li_shape XGBoost_GPU      214      48 2.169090 2.720599  0.270805      0.570738
+Li-PDOS cohort             static + li_shape     RidgeCV      214      48 2.520301 3.132009  0.033591      0.461431
+Li-PDOS cohort             static + li_shape XGBoost_GPU      214      48 1.773455 2.443056  0.411994      0.595584
+ paired cohort                   static only     RidgeCV      214      48 2.848726 3.585422 -0.266471      0.392069
+ paired cohort                   static only XGBoost_GPU      214      48 1.914680 2.722465  0.269804      0.494575
+ paired cohort          total_shape+li_shape     RidgeCV      214      48 2.137882 2.724597  0.268660      0.432707
+ paired cohort          total_shape+li_shape XGBoost_GPU      214      48 2.156713 2.755547  0.251951      0.545876
+ paired cohort static + total_shape+li_shape     RidgeCV      214      48 2.333554 2.848196  0.200802      0.497118
+ paired cohort static + total_shape+li_shape XGBoost_GPU      214      48 1.797994 2.440328  0.413306      0.577414

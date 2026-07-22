@@ -1,0 +1,26 @@
+{
+  "mounted_drive_folders": {
+    "train_pdos": "/content/obelix_audit_filtered_spectra/Train_cif",
+    "train_dos": "/content/obelix_audit_filtered_spectra/Train_cif",
+    "test_pdos": "/content/obelix_audit_filtered_spectra/Test_cif",
+    "test_dos": "/content/obelix_audit_filtered_spectra/Test_cif"
+  },
+  "frequency_range_THz": [
+    0.0,
+    100.0
+  ],
+  "frequency_scale_to_THz": 1.0,
+  "bin_widths_THz": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "primary_bin_width_THz": 1.0,
+  "primary_censor_policy": "limit",
+  "n_bootstrap": 2000,
+  "n_permutations": 5000,
+  "n_mi_permutations": 500,
+  "random_seed": 20260718,
+  "device": "NVIDIA A100-SXM4-80GB",
+  "pdos_multicolumn_fallback": "error"
+}
